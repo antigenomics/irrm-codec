@@ -31,6 +31,12 @@ Update the environment after dependency changes:
 conda env update -f environment.yml --prune
 ```
 
+Register the environment as a Jupyter kernel:
+
+```bash
+python -m ipykernel install --user --name irrm-codec --display-name "Python (irrm-codec)"
+```
+
 ## Input data
 
 Training expects two separate input files, following the same general idea as the `tcrempnet` workflow.
