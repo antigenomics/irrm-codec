@@ -1,0 +1,14 @@
+name: irrm-codec
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - pyarrow
+  - fastparquet
+  - matplotlib
+  - jupyterlab
+  - ipykernel
+  - pytorch
