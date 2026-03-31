@@ -1,10 +1,10 @@
 import argparse
-import time
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from irrm_codec.dataio import load_airr_with_embeddings
 from irrm_codec.datasets import ForwardDataset, collate_forward, validate_dataframe
@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--log-interval", type=int, default=10)
+    parser.add_argument("--no-progress", action="store_true")
     return parser.parse_args()
 
 
@@ -56,16 +57,23 @@ def build_dataloader(df, emb, batch_size, max_len, shuffle, num_workers):
     )
 
 
-def run_epoch(model, loader, optimizer, device, logger, stage, epoch, log_interval):
+def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_interval, show_progress):
     is_train = optimizer is not None
     model.train(mode=is_train)
 
     metric_sums = {"loss": 0.0, "mse": 0.0, "cosine": 0.0}
     steps = 0
     total_steps = len(loader)
-    epoch_start = time.time()
+    progress = tqdm(
+        loader,
+        total=total_steps,
+        desc=f"{stage} {epoch}/{num_epochs}",
+        dynamic_ncols=True,
+        leave=False,
+        disable=not show_progress,
+    )
 
-    for step, batch in enumerate(loader, start=1):
+    for step, batch in enumerate(progress, start=1):
         tokens, mask, target, _lengths = move_to_device(batch, device)
         with torch.set_grad_enabled(is_train):
             pred = model(tokens, mask)
@@ -83,21 +91,17 @@ def run_epoch(model, loader, optimizer, device, logger, stage, epoch, log_interv
         metric_sums["cosine"] += metrics["cosine"]
         steps += 1
 
-        should_log = step == 1 or step == total_steps or (log_interval > 0 and step % log_interval == 0)
-        if should_log:
+        should_update = step == total_steps or (log_interval > 0 and step % log_interval == 0)
+        if should_update and show_progress:
             avg_metrics = summarize_metrics(metric_sums, steps)
-            logger.info(
-                "%s epoch=%d step=%d/%d loss=%.4f mse=%.4f cosine=%.4f elapsed=%.1fs",
-                stage,
-                epoch,
-                step,
-                total_steps,
-                avg_metrics["loss"],
-                avg_metrics["mse"],
-                avg_metrics["cosine"],
-                time.time() - epoch_start,
+            progress.set_postfix(
+                loss=f"{avg_metrics['loss']:.4f}",
+                mse=f"{avg_metrics['mse']:.4f}",
+                cosine=f"{avg_metrics['cosine']:.4f}",
             )
 
+    if show_progress:
+        progress.close()
     return summarize_metrics(metric_sums, steps)
 
 
@@ -208,9 +212,27 @@ def main():
     for epoch in range(1, args.epochs + 1):
         logger.info("epoch %d/%d started", epoch, args.epochs)
         train_metrics = run_epoch(
-            model, train_loader, optimizer, device, logger, "train", epoch, args.log_interval
+            model,
+            train_loader,
+            optimizer,
+            device,
+            "train",
+            epoch,
+            args.epochs,
+            args.log_interval,
+            not args.no_progress,
         )
-        val_metrics = run_epoch(model, val_loader, None, device, logger, "val", epoch, args.log_interval)
+        val_metrics = run_epoch(
+            model,
+            val_loader,
+            None,
+            device,
+            "val",
+            epoch,
+            args.epochs,
+            args.log_interval,
+            not args.no_progress,
+        )
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
 
         save_checkpoint(
@@ -246,7 +268,17 @@ def main():
             val_metrics["cosine"],
         )
 
-    test_metrics = run_epoch(model, test_loader, None, device, logger, "test", args.epochs, args.log_interval)
+    test_metrics = run_epoch(
+        model,
+        test_loader,
+        None,
+        device,
+        "test",
+        args.epochs,
+        args.epochs,
+        args.log_interval,
+        not args.no_progress,
+    )
     save_json(output_dir / "history.json", history)
     save_json(output_dir / "test_metrics.json", test_metrics)
     logger.info(

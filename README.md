@@ -119,6 +119,8 @@ Useful optional flags:
 - `--batch-size ...`
 - `--epochs ...`
 - `--seed 42`
+- `--log-interval 10`
+- `--no-progress`
 
 ## What the training scripts do
 

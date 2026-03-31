@@ -10,4 +10,5 @@ jupyterlab
 notebook
 ipykernel
 ipywidgets
+tqdm
 torch==2.4.1
