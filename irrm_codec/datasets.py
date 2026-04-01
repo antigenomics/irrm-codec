@@ -5,6 +5,14 @@ from torch.utils.data import Dataset
 from irrm_codec.tokenization import BOS_ID, EOS_ID, PAD_ID, UNK_ID, encode
 
 
+def extract_sequences(data):
+    if hasattr(data, "columns"):
+        return data["junction_aa"].tolist()
+    if isinstance(data, dict):
+        return list(data["junction_aa"])
+    return list(data)
+
+
 def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
     required_columns = {"junction_aa", "v_call", "j_call", "locus"}
     missing_columns = required_columns.difference(df.columns)
@@ -59,7 +67,7 @@ def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
 
 class ForwardDataset(Dataset):
     def __init__(self, df, emb_array, max_len=40):
-        self.seqs = df["junction_aa"].tolist()
+        self.seqs = extract_sequences(df)
         self.embs = np.asarray(emb_array, dtype=np.float32)
         self.max_len = max_len
 
@@ -77,7 +85,7 @@ class ForwardDataset(Dataset):
 
 class InverseDataset(Dataset):
     def __init__(self, df, emb_array, max_len=40):
-        self.seqs = df["junction_aa"].tolist()
+        self.seqs = extract_sequences(df)
         self.embs = np.asarray(emb_array, dtype=np.float32)
         self.max_len = max_len
 

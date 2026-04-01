@@ -6,21 +6,20 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from irrm_codec.dataio import load_airr_with_embeddings
-from irrm_codec.datasets import InverseDataset, collate_inverse, validate_dataframe
+from irrm_codec.dataio import prepare_row_aligned_sharded_data
+from irrm_codec.datasets import InverseDataset, collate_inverse
 from irrm_codec.inverse_model import InverseModel
 from irrm_codec.losses import inverse_loss, inverse_metrics
 from irrm_codec.tokenization import decode
 from irrm_codec.utils import (
-    apply_standardizer,
     choose_device,
-    fit_standardizer,
+    create_temp_train_shard_dir,
+    load_train_shard,
     move_to_device,
     save_checkpoint,
     save_json,
     set_seed,
     setup_logging,
-    split_indices,
     summarize_metrics,
 )
 
@@ -42,6 +41,8 @@ def parse_args():
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--train-shard-size", type=int, default=100_000)
+    parser.add_argument("--io-chunk-size", type=int, default=100_000)
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--no-progress", action="store_true")
     return parser.parse_args()
@@ -128,6 +129,68 @@ def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_in
     return summarize_metrics(metric_sums, steps)
 
 
+def run_epoch_over_shards(
+    model,
+    shard_paths,
+    batch_size,
+    max_len,
+    num_workers,
+    optimizer,
+    device,
+    epoch,
+    num_epochs,
+    log_interval,
+    seed,
+    show_progress,
+    shuffle,
+    stage,
+):
+    if shuffle:
+        rng = np.random.default_rng(seed + epoch)
+        shard_order = rng.permutation(len(shard_paths))
+    else:
+        shard_order = range(len(shard_paths))
+    metric_sums = {
+        "loss": 0.0,
+        "token_accuracy": 0.0,
+        "length_accuracy": 0.0,
+        "exact_match": 0.0,
+        "unk_fraction": 0.0,
+    }
+    steps = 0
+
+    for shard_pos, shard_idx in enumerate(shard_order, start=1):
+        shard_sequences, shard_embeddings = load_train_shard(shard_paths[shard_idx])
+        shard_loader = build_dataloader(
+            shard_sequences,
+            shard_embeddings,
+            batch_size,
+            max_len,
+            shuffle,
+            num_workers,
+        )
+        shard_metrics = run_epoch(
+            model,
+            shard_loader,
+            optimizer,
+            device,
+            f"{stage} {shard_pos}/{len(shard_paths)}",
+            epoch,
+            num_epochs,
+            log_interval,
+            show_progress,
+        )
+        shard_steps = len(shard_loader)
+        for key in metric_sums:
+            metric_sums[key] += shard_metrics[key] * shard_steps
+        steps += shard_steps
+        del shard_loader
+        del shard_embeddings
+        del shard_sequences
+
+    return summarize_metrics(metric_sums, steps)
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -139,180 +202,201 @@ def main():
     logger.info("output_dir=%s", output_dir.resolve())
     logger.info("device=%s seed=%d", device, args.seed)
     logger.info(
-        "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d num_workers=%d log_interval=%d",
+        "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d num_workers=%d train_shard_size=%d io_chunk_size=%d log_interval=%d",
         args.batch_size,
         args.epochs,
         args.lr,
         args.weight_decay,
         args.max_len,
         args.num_workers,
+        args.train_shard_size,
+        args.io_chunk_size,
         args.log_interval,
     )
 
-    df, emb, merge_stats = load_airr_with_embeddings(
-        airr_path=args.airr_path,
-        embeddings_path=args.embeddings_path,
-        locus=args.locus,
-        clone_id_col=args.clone_id_col,
-        embedding_column=args.embedding_column,
-    )
-    data_stats = validate_dataframe(df, emb, max_len=args.max_len)
-
-    train_idx, val_idx, test_idx = split_indices(
-        len(df),
-        train_fraction=args.train_fraction,
-        val_fraction=args.val_fraction,
-        seed=args.seed,
-    )
-
-    train_df = df.iloc[train_idx].reset_index(drop=True)
-    val_df = df.iloc[val_idx].reset_index(drop=True)
-    test_df = df.iloc[test_idx].reset_index(drop=True)
-
-    train_emb_raw = emb[train_idx]
-    val_emb_raw = emb[val_idx]
-    test_emb_raw = emb[test_idx]
-
-    mean, std = fit_standardizer(train_emb_raw)
-    train_emb = apply_standardizer(train_emb_raw, mean, std)
-    val_emb = apply_standardizer(val_emb_raw, mean, std)
-    test_emb = apply_standardizer(test_emb_raw, mean, std)
-
-    train_loader = build_dataloader(
-        train_df, train_emb, args.batch_size, args.max_len, True, args.num_workers
-    )
-    val_loader = build_dataloader(
-        val_df, val_emb, args.batch_size, args.max_len, False, args.num_workers
-    )
-    test_loader = build_dataloader(
-        test_df, test_emb, args.batch_size, args.max_len, False, args.num_workers
-    )
-
-    model = InverseModel(embedding_dim=train_emb.shape[1], max_len=args.max_len).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    num_parameters = sum(param.numel() for param in model.parameters())
-    num_trainable_parameters = sum(param.numel() for param in model.parameters() if param.requires_grad)
-
-    logger.info(
-        "loaded data total=%d train=%d val=%d test=%d embedding_dim=%d",
-        len(df),
-        len(train_df),
-        len(val_df),
-        len(test_df),
-        train_emb.shape[1],
-    )
-    logger.info(
-        "dataloader batches train=%d val=%d test=%d",
-        len(train_loader),
-        len(val_loader),
-        len(test_loader),
-    )
-    logger.info(
-        "model parameters total=%d trainable=%d",
-        num_parameters,
-        num_trainable_parameters,
-    )
-
-    save_json(
-        output_dir / "data_stats.json",
-        {
-            **data_stats,
-            **merge_stats,
-            "airr_path": args.airr_path,
-            "embeddings_path": args.embeddings_path,
-            "train_size": int(len(train_df)),
-            "val_size": int(len(val_df)),
-            "test_size": int(len(test_df)),
-            "standardizer": {"mean_path": "mean.npy", "std_path": "std.npy"},
-            "checkpoints": {"best": "best.pt", "last": "last.pt"},
-        },
-    )
-    np.save(output_dir / "mean.npy", mean)
-    np.save(output_dir / "std.npy", std)
-
-    best_val_loss = float("inf")
-    history = []
-    for epoch in range(1, args.epochs + 1):
-        logger.info("epoch %d/%d started", epoch, args.epochs)
-        train_metrics = run_epoch(
-            model,
-            train_loader,
-            optimizer,
-            device,
-            "train",
-            epoch,
-            args.epochs,
-            args.log_interval,
-            not args.no_progress,
+    train_shard_dir = create_temp_train_shard_dir()
+    try:
+        prepared = prepare_row_aligned_sharded_data(
+            airr_path=args.airr_path,
+            embeddings_path=args.embeddings_path,
+            output_temp_dir=train_shard_dir.name,
+            locus=args.locus,
+            embedding_column=args.embedding_column,
+            max_len=args.max_len,
+            train_fraction=args.train_fraction,
+            val_fraction=args.val_fraction,
+            seed=args.seed,
+            shard_size=args.train_shard_size,
+            chunk_size=args.io_chunk_size,
         )
-        val_metrics = run_epoch(
-            model,
-            val_loader,
-            None,
-            device,
-            "val",
-            epoch,
-            args.epochs,
-            args.log_interval,
-            not args.no_progress,
-        )
-        history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
 
-        save_checkpoint(
-            output_dir / "last.pt",
-            model,
-            optimizer,
-            epoch,
-            val_metrics,
-            extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": train_emb.shape[1]},
-        )
-        logger.info("saved checkpoint path=%s", output_dir / "last.pt")
+        data_stats = prepared["data_stats"]
+        split_stats = prepared["split_stats"]
+        merge_stats = prepared["merge_stats"]
+        mean = prepared["mean"]
+        std = prepared["std"]
+        train_shard_paths = prepared["train_shard_paths"]
+        val_shard_paths = prepared["val_shard_paths"]
+        test_shard_paths = prepared["test_shard_paths"]
 
-        if val_metrics["loss"] < best_val_loss:
-            best_val_loss = val_metrics["loss"]
+        model = InverseModel(embedding_dim=prepared["embedding_dim"], max_len=args.max_len).to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        num_parameters = sum(param.numel() for param in model.parameters())
+        num_trainable_parameters = sum(param.numel() for param in model.parameters() if param.requires_grad)
+
+        logger.info(
+            "loaded data total=%d train=%d val=%d test=%d embedding_dim=%d",
+            data_stats["num_samples"],
+            split_stats["train_size"],
+            split_stats["val_size"],
+            split_stats["test_size"],
+            prepared["embedding_dim"],
+        )
+        logger.info(
+            "model parameters total=%d trainable=%d",
+            num_parameters,
+            num_trainable_parameters,
+        )
+
+        train_batches_per_epoch = sum(
+            (shard_info["num_rows"] + args.batch_size - 1) // args.batch_size
+            for shard_info in train_shard_paths
+        )
+        val_batches = sum(
+            (shard_info["num_rows"] + args.batch_size - 1) // args.batch_size
+            for shard_info in val_shard_paths
+        )
+        test_batches = sum(
+            (shard_info["num_rows"] + args.batch_size - 1) // args.batch_size
+            for shard_info in test_shard_paths
+        )
+        logger.info(
+            "dataloader batches train=%d shards=%d val=%d shards=%d test=%d shards=%d",
+            train_batches_per_epoch,
+            len(train_shard_paths),
+            val_batches,
+            len(val_shard_paths),
+            test_batches,
+            len(test_shard_paths),
+        )
+
+        save_json(
+            output_dir / "data_stats.json",
+            {
+                **data_stats,
+                **merge_stats,
+                "airr_path": args.airr_path,
+                "embeddings_path": args.embeddings_path,
+                **split_stats,
+                "io_chunk_size": int(args.io_chunk_size),
+                "train_shard_size": int(args.train_shard_size),
+                "standardizer": {"mean_path": "mean.npy", "std_path": "std.npy"},
+                "checkpoints": {"best": "best.pt", "last": "last.pt"},
+            },
+        )
+        np.save(output_dir / "mean.npy", mean)
+        np.save(output_dir / "std.npy", std)
+
+        best_val_loss = float("inf")
+        history = []
+        for epoch in range(1, args.epochs + 1):
+            logger.info("epoch %d/%d started", epoch, args.epochs)
+            train_metrics = run_epoch_over_shards(
+                model,
+                train_shard_paths,
+                args.batch_size,
+                args.max_len,
+                args.num_workers,
+                optimizer,
+                device,
+                epoch,
+                args.epochs,
+                args.log_interval,
+                args.seed,
+                not args.no_progress,
+                True,
+                "train",
+            )
+            val_metrics = run_epoch_over_shards(
+                model,
+                val_shard_paths,
+                args.batch_size,
+                args.max_len,
+                args.num_workers,
+                None,
+                device,
+                epoch,
+                args.epochs,
+                args.log_interval,
+                args.seed,
+                not args.no_progress,
+                False,
+                "val",
+            )
+            history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
+
             save_checkpoint(
-                output_dir / "best.pt",
+                output_dir / "last.pt",
                 model,
                 optimizer,
                 epoch,
                 val_metrics,
-                extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": train_emb.shape[1]},
+                extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": prepared["embedding_dim"]},
             )
-            logger.info("new best checkpoint path=%s val_loss=%.4f", output_dir / "best.pt", best_val_loss)
+            logger.info("saved checkpoint path=%s", output_dir / "last.pt")
 
-        logger.info(
-            "epoch=%d summary train_loss=%.4f train_tok_acc=%.4f train_len_acc=%.4f val_loss=%.4f val_tok_acc=%.4f val_len_acc=%.4f val_exact=%.4f",
-            epoch,
-            train_metrics["loss"],
-            train_metrics["token_accuracy"],
-            train_metrics["length_accuracy"],
-            val_metrics["loss"],
-            val_metrics["token_accuracy"],
-            val_metrics["length_accuracy"],
-            val_metrics["exact_match"],
+            if val_metrics["loss"] < best_val_loss:
+                best_val_loss = val_metrics["loss"]
+                save_checkpoint(
+                    output_dir / "best.pt",
+                    model,
+                    optimizer,
+                    epoch,
+                    val_metrics,
+                    extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": prepared["embedding_dim"]},
+                )
+                logger.info("new best checkpoint path=%s val_loss=%.4f", output_dir / "best.pt", best_val_loss)
+
+            logger.info(
+                "epoch=%d summary train_loss=%.4f train_tok_acc=%.4f train_len_acc=%.4f val_loss=%.4f val_tok_acc=%.4f val_len_acc=%.4f val_exact=%.4f",
+                epoch,
+                train_metrics["loss"],
+                train_metrics["token_accuracy"],
+                train_metrics["length_accuracy"],
+                val_metrics["loss"],
+                val_metrics["token_accuracy"],
+                val_metrics["length_accuracy"],
+                val_metrics["exact_match"],
+            )
+
+        test_metrics = run_epoch_over_shards(
+            model,
+            test_shard_paths,
+            args.batch_size,
+            args.max_len,
+            args.num_workers,
+            None,
+            device,
+            args.epochs,
+            args.epochs,
+            args.log_interval,
+            args.seed,
+            not args.no_progress,
+            False,
+            "test",
         )
-
-    test_metrics = run_epoch(
-        model,
-        test_loader,
-        None,
-        device,
-        "test",
-        args.epochs,
-        args.epochs,
-        args.log_interval,
-        not args.no_progress,
-    )
-    save_json(output_dir / "history.json", history)
-    save_json(output_dir / "test_metrics.json", test_metrics)
-    logger.info(
-        "test summary loss=%.4f tok_acc=%.4f len_acc=%.4f exact=%.4f unk=%.4f",
-        test_metrics["loss"],
-        test_metrics["token_accuracy"],
-        test_metrics["length_accuracy"],
-        test_metrics["exact_match"],
-        test_metrics["unk_fraction"],
-    )
+        save_json(output_dir / "history.json", history)
+        save_json(output_dir / "test_metrics.json", test_metrics)
+        logger.info(
+            "test summary loss=%.4f tok_acc=%.4f len_acc=%.4f exact=%.4f unk=%.4f",
+            test_metrics["loss"],
+            test_metrics["token_accuracy"],
+            test_metrics["length_accuracy"],
+            test_metrics["exact_match"],
+            test_metrics["unk_fraction"],
+        )
+    finally:
+        train_shard_dir.cleanup()
 
 
 if __name__ == "__main__":
