@@ -15,19 +15,6 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def fit_standardizer(x):
-    x = np.asarray(x, dtype=np.float32)
-    mean = x.mean(axis=0)
-    std = x.std(axis=0)
-    std = np.where(std < 1e-8, 1.0, std)
-    return mean.astype(np.float32), std.astype(np.float32)
-
-
-def apply_standardizer(x, mean, std):
-    x = np.asarray(x, dtype=np.float32)
-    return (x - mean) / std
-
-
 def choose_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

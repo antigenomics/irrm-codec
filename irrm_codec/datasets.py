@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from torch.utils.data import Dataset, IterableDataset, get_worker_info
+from torch.utils.data import IterableDataset, get_worker_info
 
 from irrm_codec.tokenization import BOS_ID, EOS_ID, PAD_ID, UNK_ID, encode
 
@@ -44,99 +44,32 @@ def validate_airr_dataframe(df, max_len=40):
     }
 
 
-def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
-    emb_array = np.asarray(emb_array, dtype=np.float32)
-    if emb_array.ndim != 2:
-        raise ValueError(f"Expected 2D embedding array, got shape {emb_array.shape}.")
-    if emb_array.shape[0] != len(df):
-        raise ValueError(
-            f"Embedding count {emb_array.shape[0]} does not match dataframe length {len(df)}."
-        )
-    if emb_array.shape[1] != emb_dim:
-        raise ValueError(f"Expected embedding dimension {emb_dim}, got {emb_array.shape[1]}.")
-    if not np.isfinite(emb_array).all():
-        raise ValueError("Embedding array contains NaN or infinite values.")
-    stats = validate_airr_dataframe(df, max_len=max_len)
-    stats["embedding_dim"] = emb_array.shape[1]
-    return stats
-
-
-class ForwardDataset(Dataset):
-    def __init__(self, df, emb_array, max_len=40):
-        self.seqs = df["junction_aa"].tolist()
-        self.embs = np.asarray(emb_array, dtype=np.float32)
-        self.max_len = max_len
-
-    def __len__(self):
-        return len(self.seqs)
-
-    def __getitem__(self, idx):
-        tokens = encode(self.seqs[idx], self.max_len)
-        return {
-            "tokens": torch.tensor(tokens, dtype=torch.long),
-            "embedding": torch.from_numpy(self.embs[idx]),
-            "length": len(tokens),
-        }
-
-
-class InverseDataset(Dataset):
-    def __init__(self, df, emb_array, max_len=40):
-        self.seqs = df["junction_aa"].tolist()
-        self.embs = np.asarray(emb_array, dtype=np.float32)
-        self.max_len = max_len
-
-    def __len__(self):
-        return len(self.seqs)
-
-    def __getitem__(self, idx):
-        tokens = encode(self.seqs[idx], self.max_len)
-        token_tensor = torch.tensor(tokens, dtype=torch.long)
-        return {
-            "embedding": torch.from_numpy(self.embs[idx]),
-            "decoder_input": torch.cat(
-                [torch.tensor([BOS_ID], dtype=torch.long), token_tensor], dim=0
-            ),
-            "target": torch.cat(
-                [token_tensor, torch.tensor([EOS_ID], dtype=torch.long)], dim=0
-            ),
-            "length": len(tokens),
-        }
-
-
-class StreamingEmbeddingDataset(IterableDataset):
-    def __init__(
-        self,
-        *,
-        task,
-        records_by_key,
-        selected_keys,
-        iter_embedding_batches_fn,
-        max_len,
-        mean,
-        std,
-        shuffle=False,
-        seed=42,
-    ):
+class CachedBatchDataset(IterableDataset):
+    def __init__(self, *, task, shard_paths, max_len, mean, std, shuffle=False, seed=42, num_rows=None):
         self.task = task
-        self.records_by_key = records_by_key
-        self.selected_keys = set(selected_keys)
-        self.iter_embedding_batches_fn = iter_embedding_batches_fn
+        self.shard_paths = [str(path) for path in shard_paths]
         self.max_len = max_len
         self.mean = np.asarray(mean, dtype=np.float32)
         self.std = np.asarray(std, dtype=np.float32)
         self.shuffle = shuffle
         self.seed = seed
         self.epoch = 0
+        self.num_rows = num_rows
 
     def __len__(self):
-        return len(self.selected_keys)
+        if self.num_rows is None:
+            total = 0
+            for shard_path in self.shard_paths:
+                with np.load(shard_path) as payload:
+                    total += len(payload["seqs"])
+            self.num_rows = total
+        return self.num_rows
 
     def set_epoch(self, epoch):
         self.epoch = int(epoch)
 
-    def _make_item(self, key, embedding):
-        record = self.records_by_key[key]
-        tokens = encode(record["junction_aa"], self.max_len)
+    def _make_item(self, seq, embedding):
+        tokens = encode(seq, self.max_len)
         token_tensor = torch.tensor(tokens, dtype=torch.long)
         embedding_tensor = torch.from_numpy(embedding)
 
@@ -160,35 +93,25 @@ class StreamingEmbeddingDataset(IterableDataset):
         num_workers = worker.num_workers if worker is not None else 1
         rng = np.random.default_rng(self.seed + self.epoch + worker_id)
 
-        for batch_index, (keys, emb_batch) in enumerate(self.iter_embedding_batches_fn()):
-            if batch_index % num_workers != worker_id:
+        shard_indices = np.arange(len(self.shard_paths))
+        if self.shuffle and len(shard_indices) > 1:
+            rng.shuffle(shard_indices)
+
+        for position, shard_idx in enumerate(shard_indices):
+            if position % num_workers != worker_id:
                 continue
 
-            matched_pairs = []
-            for row_idx, key in enumerate(keys):
-                if key in self.selected_keys:
-                    matched_pairs.append((key, row_idx))
+            with np.load(self.shard_paths[int(shard_idx)]) as payload:
+                seqs = payload["seqs"]
+                embeddings = payload["embeddings"].astype(np.float32, copy=False)
 
-            if not matched_pairs:
-                continue
+            row_indices = np.arange(len(seqs))
+            if self.shuffle and len(row_indices) > 1:
+                rng.shuffle(row_indices)
 
-            if self.shuffle and len(matched_pairs) > 1:
-                rng.shuffle(matched_pairs)
-
-            row_indices = [row_idx for _key, row_idx in matched_pairs]
-            embeddings = emb_batch[row_indices]
-            if embeddings.ndim != 2:
-                raise ValueError(f"Expected 2D embedding batch, got shape {embeddings.shape}.")
-            if embeddings.shape[1] != self.mean.shape[0]:
-                raise ValueError(
-                    f"Embedding dimension {embeddings.shape[1]} does not match standardizer dimension {self.mean.shape[0]}."
-                )
-            if not np.isfinite(embeddings).all():
-                raise ValueError("Embedding batch contains NaN or infinite values.")
-
-            standardized = ((embeddings - self.mean) / self.std).astype(np.float32, copy=False)
-            for (key, _row_idx), embedding in zip(matched_pairs, standardized):
-                yield self._make_item(key, embedding)
+            standardized = ((embeddings[row_indices] - self.mean) / self.std).astype(np.float32, copy=False)
+            for seq, embedding in zip(seqs[row_indices], standardized):
+                yield self._make_item(str(seq), embedding)
 
 
 def collate_forward(batch):
