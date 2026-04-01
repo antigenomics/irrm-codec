@@ -37,6 +37,15 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--hidden-dim", type=int, default=256)
+    parser.add_argument("--mlp-dim", type=int, default=1024)
+    parser.add_argument("--mlp-hidden-dim", type=int, default=2048)
+    parser.add_argument("--early-stopping-patience", type=int, default=5)
+    parser.add_argument("--scheduler", choices=["none", "plateau"], default="plateau")
+    parser.add_argument("--scheduler-factor", type=float, default=0.5)
+    parser.add_argument("--scheduler-patience", type=int, default=2)
+    parser.add_argument("--scheduler-min-lr", type=float, default=1e-6)
     parser.add_argument("--train-fraction", type=float, default=0.8)
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -105,6 +114,31 @@ def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_in
     return summarize_metrics(metric_sums, steps)
 
 
+def build_scheduler(optimizer, args):
+    if args.scheduler == "none":
+        return None
+    if args.scheduler == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=args.scheduler_factor,
+            patience=args.scheduler_patience,
+            min_lr=args.scheduler_min_lr,
+        )
+    raise ValueError(f"Unsupported scheduler: {args.scheduler}")
+
+
+def build_model(args, output_dim):
+    return ForwardModel(
+        output_dim=output_dim,
+        max_len=args.max_len,
+        hidden_dim=args.hidden_dim,
+        mlp_dim=args.mlp_dim,
+        mlp_hidden_dim=args.mlp_hidden_dim,
+        dropout=args.dropout,
+    )
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -116,14 +150,20 @@ def main():
     logger.info("output_dir=%s", output_dir.resolve())
     logger.info("device=%s seed=%d", device, args.seed)
     logger.info(
-        "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d num_workers=%d log_interval=%d",
+        "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d hidden_dim=%d mlp_dim=%d mlp_hidden_dim=%d dropout=%.3f num_workers=%d log_interval=%d early_stopping_patience=%d scheduler=%s",
         args.batch_size,
         args.epochs,
         args.lr,
         args.weight_decay,
         args.max_len,
+        args.hidden_dim,
+        args.mlp_dim,
+        args.mlp_hidden_dim,
+        args.dropout,
         args.num_workers,
         args.log_interval,
+        args.early_stopping_patience,
+        args.scheduler,
     )
 
     df, emb, merge_stats = load_airr_with_embeddings(
@@ -165,8 +205,9 @@ def main():
         test_df, test_emb, args.batch_size, args.max_len, False, args.num_workers
     )
 
-    model = ForwardModel(output_dim=train_emb.shape[1], max_len=args.max_len).to(device)
+    model = build_model(args, train_emb.shape[1]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = build_scheduler(optimizer, args)
     num_parameters = sum(param.numel() for param in model.parameters())
     num_trainable_parameters = sum(param.numel() for param in model.parameters() if param.requires_grad)
 
@@ -207,7 +248,19 @@ def main():
     np.save(output_dir / "mean.npy", mean)
     np.save(output_dir / "std.npy", std)
 
+    checkpoint_extra = {
+        "task": "forward",
+        "max_len": args.max_len,
+        "embedding_dim": train_emb.shape[1],
+        "hidden_dim": args.hidden_dim,
+        "mlp_dim": args.mlp_dim,
+        "mlp_hidden_dim": args.mlp_hidden_dim,
+        "dropout": args.dropout,
+    }
+
     best_val_loss = float("inf")
+    best_epoch = 0
+    epochs_without_improvement = 0
     history = []
     for epoch in range(1, args.epochs + 1):
         logger.info("epoch %d/%d started", epoch, args.epochs)
@@ -235,27 +288,34 @@ def main():
         )
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
 
+        if scheduler is not None:
+            scheduler.step(val_metrics["loss"])
+
         save_checkpoint(
             output_dir / "last.pt",
             model,
             optimizer,
             epoch,
             val_metrics,
-            extra={"task": "forward", "max_len": args.max_len, "embedding_dim": train_emb.shape[1]},
+            extra=checkpoint_extra,
         )
         logger.info("saved checkpoint path=%s", output_dir / "last.pt")
 
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
+            best_epoch = epoch
+            epochs_without_improvement = 0
             save_checkpoint(
                 output_dir / "best.pt",
                 model,
                 optimizer,
                 epoch,
                 val_metrics,
-                extra={"task": "forward", "max_len": args.max_len, "embedding_dim": train_emb.shape[1]},
+                extra=checkpoint_extra,
             )
             logger.info("new best checkpoint path=%s val_loss=%.4f", output_dir / "best.pt", best_val_loss)
+        else:
+            epochs_without_improvement += 1
 
         logger.info(
             "epoch=%d summary train_loss=%.4f train_mse=%.4f train_cosine=%.4f val_loss=%.4f val_mse=%.4f val_cosine=%.4f",
@@ -267,6 +327,37 @@ def main():
             val_metrics["mse"],
             val_metrics["cosine"],
         )
+
+        logger.info(
+            "epoch=%d control best_epoch=%d best_val_loss=%.4f epochs_without_improvement=%d lr=%.6g",
+            epoch,
+            best_epoch,
+            best_val_loss,
+            epochs_without_improvement,
+            optimizer.param_groups[0]["lr"],
+        )
+
+        if (
+            args.early_stopping_patience > 0
+            and epochs_without_improvement >= args.early_stopping_patience
+        ):
+            logger.info(
+                "early stopping triggered at epoch=%d best_epoch=%d best_val_loss=%.4f patience=%d",
+                epoch,
+                best_epoch,
+                best_val_loss,
+                args.early_stopping_patience,
+            )
+            break
+
+    best_checkpoint = torch.load(output_dir / "best.pt", map_location=device)
+    model.load_state_dict(best_checkpoint["model_state"])
+    logger.info(
+        "loaded best checkpoint for test path=%s epoch=%d val_loss=%.4f",
+        output_dir / "best.pt",
+        best_checkpoint["epoch"],
+        best_checkpoint["metrics"]["loss"],
+    )
 
     test_metrics = run_epoch(
         model,
@@ -280,12 +371,21 @@ def main():
         not args.no_progress,
     )
     save_json(output_dir / "history.json", history)
-    save_json(output_dir / "test_metrics.json", test_metrics)
+    save_json(
+        output_dir / "test_metrics.json",
+        {
+            **test_metrics,
+            "best_checkpoint_epoch": int(best_checkpoint["epoch"]),
+            "best_checkpoint_val_loss": float(best_checkpoint["metrics"]["loss"]),
+        },
+    )
     logger.info(
-        "test summary loss=%.4f mse=%.4f cosine=%.4f",
+        "test summary loss=%.4f mse=%.4f cosine=%.4f best_epoch=%d best_val_loss=%.4f",
         test_metrics["loss"],
         test_metrics["mse"],
         test_metrics["cosine"],
+        best_checkpoint["epoch"],
+        best_checkpoint["metrics"]["loss"],
     )
 
 

@@ -27,22 +27,32 @@ class ResidualBlock(nn.Module):
 
 
 class ForwardModel(nn.Module):
-    def __init__(self, vocab_size=24, embedding_dim=64, hidden_dim=256, output_dim=9000, max_len=40):
+    def __init__(
+        self,
+        vocab_size=24,
+        embedding_dim=64,
+        hidden_dim=256,
+        mlp_dim=1024,
+        mlp_hidden_dim=2048,
+        dropout=0.1,
+        output_dim=9000,
+        max_len=40,
+    ):
         super().__init__()
         self.max_len = max_len
         self.emb = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         self.proj = nn.Conv1d(embedding_dim, hidden_dim, 1)
         self.blocks = nn.ModuleList(
-            [ResidualBlock(hidden_dim, dilation) for dilation in [1, 1, 2, 2, 4, 8]]
+            [ResidualBlock(hidden_dim, dilation, dropout=dropout) for dilation in [1, 1, 2, 2, 4, 8]]
         )
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 1024),
+            nn.Linear(hidden_dim * 2, mlp_dim),
             nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(1024, 2048),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, mlp_hidden_dim),
             nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(2048, output_dim),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden_dim, output_dim),
         )
 
     def forward(self, tokens, mask):
