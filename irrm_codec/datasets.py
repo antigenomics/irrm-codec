@@ -3,47 +3,6 @@ import torch
 from torch.utils.data import IterableDataset, get_worker_info
 
 from irrm_codec.tokenization import BOS_ID, EOS_ID, PAD_ID, UNK_ID, encode
-
-
-def validate_airr_dataframe(df, max_len=40):
-    required_columns = {"junction_aa", "v_call", "j_call", "locus"}
-    missing_columns = required_columns.difference(df.columns)
-    if missing_columns:
-        missing = ", ".join(sorted(missing_columns))
-        raise ValueError(f"Dataframe is missing required columns: {missing}")
-
-    if len(df) == 0:
-        raise ValueError("Dataframe is empty after filtering.")
-
-    sequence_lengths = []
-    unk_sequences = 0
-    truncated_sequences = 0
-    empty_sequences = 0
-
-    for raw_seq in df["junction_aa"].tolist():
-        seq = "" if raw_seq is None else str(raw_seq).strip().upper()
-        if not seq:
-            empty_sequences += 1
-            continue
-        sequence_lengths.append(len(seq))
-        unk_sequences += int(any(char not in "ACDEFGHIKLMNPQRSTVWY" for char in seq))
-        truncated_sequences += int(len(seq) > max_len)
-
-    if empty_sequences:
-        raise ValueError(f"Found {empty_sequences} empty or missing sequences.")
-
-    return {
-        "num_samples": len(df),
-        "num_unique_clone_ids": int(df["clone_id"].nunique()) if "clone_id" in df.columns else int(len(df)),
-        "min_length": int(min(sequence_lengths)),
-        "max_length": int(max(sequence_lengths)),
-        "mean_length": float(np.mean(sequence_lengths)),
-        "truncated_fraction": truncated_sequences / len(df),
-        "unk_sequence_fraction": unk_sequences / len(df),
-        "max_len": max_len,
-    }
-
-
 class CachedBatchDataset(IterableDataset):
     def __init__(self, *, task, shard_paths, max_len, mean, std, shuffle=False, seed=42, num_rows=None):
         self.task = task
@@ -112,6 +71,10 @@ class CachedBatchDataset(IterableDataset):
             standardized = ((embeddings[row_indices] - self.mean) / self.std).astype(np.float32, copy=False)
             for seq, embedding in zip(seqs[row_indices], standardized):
                 yield self._make_item(str(seq), embedding)
+            del seqs
+            del embeddings
+            del row_indices
+            del standardized
 
 
 def collate_forward(batch):
