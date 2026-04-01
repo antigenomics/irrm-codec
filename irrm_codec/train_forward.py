@@ -37,10 +37,12 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--hidden-dim", type=int, default=256)
-    parser.add_argument("--mlp-dim", type=int, default=1024)
-    parser.add_argument("--mlp-hidden-dim", type=int, default=2048)
+    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--hidden-dim", type=int, default=192)
+    parser.add_argument("--mlp-dim", type=int, default=512)
+    parser.add_argument("--mlp-hidden-dim", type=int, default=1024)
+    parser.add_argument("--dilations", default="1,2,4,8")
+    parser.add_argument("--encoder-type", choices=["residual", "plain_conv"], default="plain_conv")
     parser.add_argument("--early-stopping-patience", type=int, default=5)
     parser.add_argument("--scheduler", choices=["none", "plateau"], default="plateau")
     parser.add_argument("--scheduler-factor", type=float, default=0.5)
@@ -129,6 +131,9 @@ def build_scheduler(optimizer, args):
 
 
 def build_model(args, output_dim):
+    dilations = tuple(int(part.strip()) for part in args.dilations.split(",") if part.strip())
+    if not dilations:
+        raise ValueError("dilations must contain at least one integer.")
     return ForwardModel(
         output_dim=output_dim,
         max_len=args.max_len,
@@ -136,6 +141,8 @@ def build_model(args, output_dim):
         mlp_dim=args.mlp_dim,
         mlp_hidden_dim=args.mlp_hidden_dim,
         dropout=args.dropout,
+        dilations=dilations,
+        encoder_type=args.encoder_type,
     )
 
 
@@ -150,16 +157,18 @@ def main():
     logger.info("output_dir=%s", output_dir.resolve())
     logger.info("device=%s seed=%d", device, args.seed)
     logger.info(
-        "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d hidden_dim=%d mlp_dim=%d mlp_hidden_dim=%d dropout=%.3f num_workers=%d log_interval=%d early_stopping_patience=%d scheduler=%s",
+        "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d encoder_type=%s hidden_dim=%d mlp_dim=%d mlp_hidden_dim=%d dropout=%.3f dilations=%s num_workers=%d log_interval=%d early_stopping_patience=%d scheduler=%s",
         args.batch_size,
         args.epochs,
         args.lr,
         args.weight_decay,
         args.max_len,
+        args.encoder_type,
         args.hidden_dim,
         args.mlp_dim,
         args.mlp_hidden_dim,
         args.dropout,
+        args.dilations,
         args.num_workers,
         args.log_interval,
         args.early_stopping_patience,
@@ -252,10 +261,12 @@ def main():
         "task": "forward",
         "max_len": args.max_len,
         "embedding_dim": train_emb.shape[1],
+        "encoder_type": args.encoder_type,
         "hidden_dim": args.hidden_dim,
         "mlp_dim": args.mlp_dim,
         "mlp_hidden_dim": args.mlp_hidden_dim,
         "dropout": args.dropout,
+        "dilations": args.dilations,
     }
 
     best_val_loss = float("inf")

@@ -26,15 +26,32 @@ class ResidualBlock(nn.Module):
         return F.gelu(x + residual)
 
 
+class ConvBlock(nn.Module):
+    def __init__(self, channels, dilation, dropout=0.1):
+        super().__init__()
+        self.conv = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
+        self.norm = nn.BatchNorm1d(channels)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.norm(x)
+        x = F.gelu(x)
+        x = self.dropout(x)
+        return x
+
+
 class ForwardModel(nn.Module):
     def __init__(
         self,
         vocab_size=24,
         embedding_dim=64,
-        hidden_dim=256,
-        mlp_dim=1024,
-        mlp_hidden_dim=2048,
-        dropout=0.1,
+        hidden_dim=192,
+        mlp_dim=512,
+        mlp_hidden_dim=1024,
+        dropout=0.2,
+        dilations=(1, 2, 4, 8),
+        encoder_type="residual",
         output_dim=9000,
         max_len=40,
     ):
@@ -42,8 +59,14 @@ class ForwardModel(nn.Module):
         self.max_len = max_len
         self.emb = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         self.proj = nn.Conv1d(embedding_dim, hidden_dim, 1)
+        if encoder_type == "residual":
+            block_cls = ResidualBlock
+        elif encoder_type == "plain_conv":
+            block_cls = ConvBlock
+        else:
+            raise ValueError(f"Unsupported encoder_type: {encoder_type}")
         self.blocks = nn.ModuleList(
-            [ResidualBlock(hidden_dim, dilation, dropout=dropout) for dilation in [1, 1, 2, 2, 4, 8]]
+            [block_cls(hidden_dim, dilation, dropout=dropout) for dilation in dilations]
         )
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim * 2, mlp_dim),
