@@ -1,15 +1,19 @@
 import argparse
+import logging
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from irrm_codec.dataio import inspect_embeddings_file, iter_embedding_batches, read_airr_table
-from irrm_codec.datasets import StreamingEmbeddingDataset, collate_inverse, validate_airr_dataframe
+from irrm_codec.datasets import collate_inverse, validate_airr_dataframe
 from irrm_codec.inverse_model import InverseModel
 from irrm_codec.losses import inverse_loss, inverse_metrics
+from irrm_codec.streaming_training import (
+    build_streaming_dataloader,
+    fit_streaming_standardizer_with_logging,
+    prepare_streaming_splits,
+)
 from irrm_codec.tokenization import decode
 from irrm_codec.utils import (
     choose_device,
@@ -18,7 +22,6 @@ from irrm_codec.utils import (
     save_json,
     set_seed,
     setup_logging,
-    split_indices,
     summarize_metrics,
 )
 
@@ -46,146 +49,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_airr_records(args):
-    airr_df = read_airr_table(args.airr_path, clone_id_col=args.clone_id_col)
-    if args.locus is not None:
-        airr_df = airr_df[airr_df["locus"] == args.locus].reset_index(drop=True)
-    if len(airr_df) == 0:
-        raise ValueError("AIRR table is empty after locus filtering.")
-    return airr_df
-
-
-def build_embedding_iterator(args, alignment_mode):
-    def iterator():
-        row_offset = 0
-        for clone_ids, emb_batch in iter_embedding_batches(
-            args.embeddings_path,
-            batch_size=args.reader_batch_size,
-            clone_id_col=args.clone_id_col,
-            embedding_column=args.embedding_column,
-            include_clone_id=(alignment_mode == "clone_id"),
-        ):
-            if alignment_mode == "row_order":
-                keys = list(range(row_offset, row_offset + len(emb_batch)))
-                row_offset += len(emb_batch)
-            else:
-                keys = clone_ids
-            yield keys, emb_batch
-
-    return iterator
-
-
-def prepare_streaming_splits(args):
-    airr_df = load_airr_records(args)
-    embedding_info = inspect_embeddings_file(
-        args.embeddings_path,
-        clone_id_col=args.clone_id_col,
-        embedding_column=args.embedding_column,
-    )
-    records_by_clone = {
-        row[args.clone_id_col]: {"junction_aa": row["junction_aa"]}
-        for _, row in airr_df.iterrows()
-        if args.clone_id_col in airr_df.columns
-    }
-
-    if args.clone_id_col not in airr_df.columns:
-        if len(airr_df) != embedding_info["num_rows"]:
-            raise ValueError(
-                f"AIRR table has {len(airr_df)} rows but embeddings file has {embedding_info['num_rows']} rows. "
-                "Row-order alignment is only supported when lengths match."
-            )
-        alignment_mode = "row_order"
-        matched_keys = list(range(len(airr_df)))
-        records_by_key = {idx: {"junction_aa": seq} for idx, seq in enumerate(airr_df["junction_aa"].tolist())}
-    else:
-        alignment_mode = "clone_id"
-        seen_clone_ids = set()
-        matched_keys = []
-        for clone_ids, _emb_batch in iter_embedding_batches(
-            args.embeddings_path,
-            batch_size=args.reader_batch_size,
-            clone_id_col=args.clone_id_col,
-            embedding_column=args.embedding_column,
-            include_clone_id=True,
-        ):
-            for clone_id in clone_ids:
-                if clone_id in seen_clone_ids:
-                    raise ValueError(f"Embeddings table contains duplicate {args.clone_id_col} values.")
-                seen_clone_ids.add(clone_id)
-                if clone_id in records_by_clone:
-                    matched_keys.append(clone_id)
-
-        if not matched_keys:
-            raise ValueError(f"No rows matched between AIRR and embeddings tables by {args.clone_id_col}.")
-        records_by_key = records_by_clone
-
-    matched_key_set = set(matched_keys)
-    if alignment_mode == "row_order":
-        matched_df = airr_df.copy().reset_index(drop=True)
-    else:
-        matched_df = airr_df[airr_df[args.clone_id_col].isin(matched_key_set)].reset_index(drop=True)
-
-    train_idx, val_idx, test_idx = split_indices(
-        len(matched_keys),
-        train_fraction=args.train_fraction,
-        val_fraction=args.val_fraction,
-        seed=args.seed,
-    )
-    split_keys = {
-        "train": {matched_keys[idx] for idx in train_idx},
-        "val": {matched_keys[idx] for idx in val_idx},
-        "test": {matched_keys[idx] for idx in test_idx},
-    }
-    merge_stats = {
-        "airr_rows": int(len(airr_df)),
-        "embeddings_rows": int(embedding_info["num_rows"]),
-        "merged_rows": int(len(matched_keys)),
-        "airr_unmatched_rows": int(len(airr_df) - len(matched_keys)),
-        "embeddings_unmatched_rows": int(embedding_info["num_rows"] - len(matched_keys)),
-        "clone_id_column": args.clone_id_col,
-        "embedding_column": args.embedding_column,
-        "alignment_mode": alignment_mode,
-        "embedding_dim": int(embedding_info["embedding_dim"]),
-    }
-    return matched_df, records_by_key, split_keys, merge_stats, build_embedding_iterator(args, alignment_mode)
-
-
-def fit_streaming_standardizer(iter_batches_fn, selected_keys, embedding_dim):
-    count = 0
-    feature_sum = np.zeros(embedding_dim, dtype=np.float64)
-    feature_sum_sq = np.zeros(embedding_dim, dtype=np.float64)
-
-    for keys, emb_batch in iter_batches_fn():
-        row_indices = [row_idx for row_idx, key in enumerate(keys) if key in selected_keys]
-        if not row_indices:
-            continue
-
-        embeddings = np.asarray(emb_batch[row_indices], dtype=np.float32)
-        if embeddings.ndim != 2:
-            raise ValueError(f"Expected 2D embedding batch, got shape {embeddings.shape}.")
-        if embeddings.shape[1] != embedding_dim:
-            raise ValueError(f"Expected embedding dimension {embedding_dim}, got {embeddings.shape[1]}.")
-        if not np.isfinite(embeddings).all():
-            raise ValueError("Embeddings matrix contains NaN or infinite values.")
-
-        feature_sum += embeddings.sum(axis=0, dtype=np.float64)
-        feature_sum_sq += np.square(embeddings, dtype=np.float64).sum(axis=0)
-        count += embeddings.shape[0]
-
-    if count == 0:
-        raise ValueError("No training embeddings were found while fitting the standardizer.")
-    if count != len(selected_keys):
-        raise ValueError(
-            f"Expected {len(selected_keys)} training embeddings while fitting the standardizer, found {count}."
-        )
-
-    mean = feature_sum / count
-    variance = np.maximum(feature_sum_sq / count - np.square(mean), 0.0)
-    std = np.sqrt(variance)
-    std = np.where(std < 1e-8, 1.0, std)
-    return mean.astype(np.float32), std.astype(np.float32)
-
-
 def build_dataloader(
     records_by_key,
     selected_keys,
@@ -198,22 +61,19 @@ def build_dataloader(
     std,
     seed,
 ):
-    dataset = StreamingEmbeddingDataset(
+    return build_streaming_dataloader(
         task="inverse",
+        collate_fn=collate_inverse,
         records_by_key=records_by_key,
         selected_keys=selected_keys,
         iter_embedding_batches_fn=iter_batches_fn,
+        batch_size=batch_size,
         max_len=max_len,
+        shuffle=shuffle,
+        num_workers=num_workers,
         mean=mean,
         std=std,
-        shuffle=shuffle,
         seed=seed,
-    )
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        collate_fn=collate_inverse,
     )
 
 
@@ -231,6 +91,8 @@ def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_in
     model.train(mode=is_train)
     if hasattr(loader.dataset, "set_epoch"):
         loader.dataset.set_epoch(epoch)
+    logger = logging.getLogger("irrm_codec")
+    logger.info("run_epoch start stage=%s epoch=%d/%d batches=%d", stage, epoch, num_epochs, len(loader))
 
     metric_sums = {
         "loss": 0.0,
@@ -286,6 +148,7 @@ def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_in
 
     if show_progress:
         progress.close()
+    logger.info("run_epoch done stage=%s epoch=%d/%d", stage, epoch, num_epochs)
     return summarize_metrics(metric_sums, steps)
 
 
@@ -311,16 +174,20 @@ def main():
         args.log_interval,
     )
 
-    df, records_by_key, split_keys, merge_stats, iter_batches_fn = prepare_streaming_splits(args)
+    logger.info("preparing streaming splits")
+    df, records_by_key, split_keys, merge_stats, iter_batches_fn = prepare_streaming_splits(args, logger=logger)
     data_stats = validate_airr_dataframe(df, max_len=args.max_len)
     data_stats["embedding_dim"] = merge_stats["embedding_dim"]
 
-    mean, std = fit_streaming_standardizer(
+    mean, std = fit_streaming_standardizer_with_logging(
         iter_batches_fn,
         split_keys["train"],
         merge_stats["embedding_dim"],
+        logger=logger,
     )
 
+    logger.info("building dataloaders")
+    logger.info("creating train dataloader")
     train_loader = build_dataloader(
         records_by_key,
         split_keys["train"],
@@ -333,6 +200,7 @@ def main():
         std,
         args.seed,
     )
+    logger.info("creating val dataloader")
     val_loader = build_dataloader(
         records_by_key,
         split_keys["val"],
@@ -345,6 +213,7 @@ def main():
         std,
         args.seed,
     )
+    logger.info("creating test dataloader")
     test_loader = build_dataloader(
         records_by_key,
         split_keys["test"],
@@ -357,6 +226,7 @@ def main():
         std,
         args.seed,
     )
+    logger.info("dataloaders ready; starting model initialization")
 
     model = InverseModel(embedding_dim=merge_stats["embedding_dim"], max_len=args.max_len).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
