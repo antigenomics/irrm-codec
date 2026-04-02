@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from irrm_codec.tokenization import BOS_ID, EOS_ID, PAD_ID, UNK_ID, encode
+from irrm_codec.tokenization import EOS_ID, PAD_ID, UNK_ID, encode
 
 
 def validate_dataframe(df, emb_array, max_len=40, emb_dim=9000):
@@ -86,15 +86,12 @@ class InverseDataset(Dataset):
 
     def __getitem__(self, idx):
         tokens = encode(self.seqs[idx], self.max_len)
-        token_tensor = torch.tensor(tokens, dtype=torch.long)
+        target = torch.full((self.max_len + 1,), PAD_ID, dtype=torch.long)
+        target[: len(tokens)] = torch.tensor(tokens, dtype=torch.long)
+        target[len(tokens)] = EOS_ID
         return {
             "embedding": torch.from_numpy(self.embs[idx]),
-            "decoder_input": torch.cat(
-                [torch.tensor([BOS_ID], dtype=torch.long), token_tensor], dim=0
-            ),
-            "target": torch.cat(
-                [token_tensor, torch.tensor([EOS_ID], dtype=torch.long)], dim=0
-            ),
+            "target": target,
             "length": len(tokens),
         }
 
@@ -113,17 +110,8 @@ def collate_forward(batch):
 
 def collate_inverse(batch):
     emb = torch.stack([item["embedding"] for item in batch])
-    decoder_input = torch.nn.utils.rnn.pad_sequence(
-        [item["decoder_input"] for item in batch],
-        batch_first=True,
-        padding_value=PAD_ID,
-    )
-    target = torch.nn.utils.rnn.pad_sequence(
-        [item["target"] for item in batch],
-        batch_first=True,
-        padding_value=PAD_ID,
-    )
+    target = torch.stack([item["target"] for item in batch])
     lengths = torch.tensor([item["length"] for item in batch], dtype=torch.long)
     target_mask = target.ne(PAD_ID)
     unk_fraction = target.eq(UNK_ID).logical_and(target_mask).float().sum() / target_mask.float().sum()
-    return emb, decoder_input, target, lengths, unk_fraction
+    return emb, target, lengths, unk_fraction

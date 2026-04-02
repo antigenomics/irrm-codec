@@ -35,7 +35,8 @@ def inverse_metrics(logits, target, length_logits, lengths):
         token_accuracy = (token_accuracy / valid_mask.sum().clamp_min(1)).item()
 
         length_pred = length_logits.argmax(dim=-1)
-        length_accuracy = length_pred.eq(lengths).float().mean().item()
+        length_targets = lengths.clamp(min=0, max=length_logits.size(-1) - 1)
+        length_accuracy = length_pred.eq(length_targets).float().mean().item()
 
     return {
         "token_accuracy": token_accuracy,

@@ -162,6 +162,6 @@ The example notebook [notebooks/example_run_and_analysis.ipynb](/c:/Users/lizzka
 
 ## Notes
 
-- The current inverse model uses greedy autoregressive decoding.
+- The current inverse model predicts the full token sequence in parallel and uses a separate head for EOS-position prediction.
 - The current pipeline expects one chain at a time and uses `locus` filtering to select it.
 - Training outputs are intentionally ignored by git via [`.gitignore`](/c:/Users/lizzka239/projects/irrm-codec/.gitignore#L1).

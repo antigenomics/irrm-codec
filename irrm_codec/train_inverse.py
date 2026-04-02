@@ -90,9 +90,9 @@ def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_in
     )
 
     for step, batch in enumerate(progress, start=1):
-        emb, decoder_input, target, lengths, unk_fraction = move_to_device(batch, device)
+        emb, target, lengths, unk_fraction = move_to_device(batch, device)
         with torch.set_grad_enabled(is_train):
-            logits, length_logits = model(emb, decoder_input)
+            logits, length_logits = model(emb)
             loss = inverse_loss(logits, target, length_logits, lengths)
             metrics = inverse_metrics(logits, target, length_logits, lengths)
 
@@ -292,6 +292,15 @@ def main():
             val_metrics["exact_match"],
         )
 
+    best_checkpoint = torch.load(output_dir / "best.pt", map_location=device)
+    model.load_state_dict(best_checkpoint["model_state"])
+    logger.info(
+        "loaded best checkpoint for test path=%s epoch=%d val_loss=%.4f",
+        output_dir / "best.pt",
+        best_checkpoint["epoch"],
+        best_checkpoint["metrics"]["loss"],
+    )
+
     test_metrics = run_epoch(
         model,
         test_loader,
@@ -304,14 +313,23 @@ def main():
         not args.no_progress,
     )
     save_json(output_dir / "history.json", history)
-    save_json(output_dir / "test_metrics.json", test_metrics)
+    save_json(
+        output_dir / "test_metrics.json",
+        {
+            **test_metrics,
+            "best_checkpoint_epoch": int(best_checkpoint["epoch"]),
+            "best_checkpoint_val_loss": float(best_checkpoint["metrics"]["loss"]),
+        },
+    )
     logger.info(
-        "test summary loss=%.4f tok_acc=%.4f len_acc=%.4f exact=%.4f unk=%.4f",
+        "test summary loss=%.4f tok_acc=%.4f len_acc=%.4f exact=%.4f unk=%.4f best_epoch=%d best_val_loss=%.4f",
         test_metrics["loss"],
         test_metrics["token_accuracy"],
         test_metrics["length_accuracy"],
         test_metrics["exact_match"],
         test_metrics["unk_fraction"],
+        best_checkpoint["epoch"],
+        best_checkpoint["metrics"]["loss"],
     )
 
 
