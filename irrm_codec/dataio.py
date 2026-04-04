@@ -110,6 +110,7 @@ def load_airr_with_embeddings(
     embedding_column="tcremp_emb",
 ):
     airr_df = read_airr_table(airr_path, clone_id_col=clone_id_col)
+    airr_rows_before_locus = len(airr_df)
     if locus is not None:
         locus = normalize_locus_name(locus)
         locus_series = airr_df["locus"].astype(str).str.strip().str.lower().map(normalize_locus_name)
@@ -149,8 +150,20 @@ def load_airr_with_embeddings(
         merged = merged.drop(columns=["_embedding_index"]).reset_index(drop=True)
         use_row_alignment = False
 
+        if clone_id_col not in embeddings_raw.columns:
+            raise ValueError(
+                "Embeddings table does not contain "
+                f"'{clone_id_col}', so merge by id is impossible. "
+                f"Row-order alignment is only allowed when row counts match exactly: "
+                f"AIRR before locus filter={airr_rows_before_locus}, "
+                f"AIRR after locus filter={len(airr_df)}, "
+                f"embeddings={len(embeddings_raw)}, "
+                f"locus={locus!r}."
+            )
+
     stats = {
         "airr_rows": int(len(airr_df)),
+        "airr_rows_before_locus": int(airr_rows_before_locus),
         "embeddings_rows": int(len(embeddings_raw)),
         "merged_rows": int(len(merged)),
         "airr_unmatched_rows": int(len(airr_df) - len(merged)),
