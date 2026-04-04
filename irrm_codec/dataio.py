@@ -6,6 +6,23 @@ import pandas as pd
 
 AIRR_REQUIRED_COLUMNS = {"junction_aa", "v_call", "j_call", "locus"}
 
+LOCUS_ALIASES = {
+    "tra": "alpha",
+    "trb": "beta",
+    "trg": "gamma",
+    "trd": "delta",
+    "igh": "heavy",
+    "igk": "kappa",
+    "igl": "lambda",
+}
+
+
+def normalize_locus_name(value):
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    return LOCUS_ALIASES.get(normalized, normalized)
+
 
 def read_airr_table(path, clone_id_col="clone_id"):
     path = Path(path)
@@ -94,14 +111,20 @@ def load_airr_with_embeddings(
 ):
     airr_df = read_airr_table(airr_path, clone_id_col=clone_id_col)
     if locus is not None:
-        airr_df = airr_df[airr_df["locus"] == locus].reset_index(drop=True)
+        locus = normalize_locus_name(locus)
+        locus_series = airr_df["locus"].astype(str).str.strip().str.lower().map(normalize_locus_name)
+        airr_df = airr_df[locus_series == locus].reset_index(drop=True)
     if len(airr_df) == 0:
         raise ValueError("AIRR table is empty after locus filtering.")
 
     embeddings_raw = pd.read_parquet(embeddings_path)
-    if clone_id_col not in airr_df.columns and len(airr_df) == len(embeddings_raw):
+    can_align_by_row_order = (
+        len(airr_df) == len(embeddings_raw) and clone_id_col not in embeddings_raw.columns
+    )
+    if can_align_by_row_order:
         merged = airr_df.copy().reset_index(drop=True)
-        merged[clone_id_col] = np.arange(len(merged)).astype(str)
+        if clone_id_col not in merged.columns:
+            merged[clone_id_col] = np.arange(len(merged)).astype(str)
         emb = get_embedding_matrix(embeddings_raw, embedding_column=embedding_column)
         use_row_alignment = True
     else:
