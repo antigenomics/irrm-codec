@@ -57,12 +57,21 @@ echo "locus=$LOCUS"
   --output-dir "$OUTPUT_DIR" \
   --locus "$LOCUS" \
   --clone-id-col clone_id \
-  --embedding-column tcremp_emb \
   --max-len 40 \
   --batch-size 256 \
   --epochs 40 \
-  --lr 1e-3 \
-  --weight-decay 1e-4 \
+  --lr 3e-4 \
+  --weight-decay 1e-3 \
+  --dropout 0.2 \
+  --encoder-type plain_conv \
+  --hidden-dim 192 \
+  --mlp-dim 512 \
+  --mlp-hidden-dim 1024 \
+  --dilations 1,2,4,8 \
+  --early-stopping-patience 5 \
+  --scheduler plateau \
+  --scheduler-patience 2 \
+  --scheduler-factor 0.5 \
   --train-fraction 0.8 \
   --val-fraction 0.1 \
   --seed 42 \

@@ -1,7 +1,68 @@
 #!/usr/bin/env bash
+#SBATCH --job-name=irrm-inverse-bg100k
+#SBATCH --partition=short
+#SBATCH --constraint=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=02:00:00
+#SBATCH --array=0-6
+#SBATCH --output=/projects/immunestatus/vdjrearm/irrmcodec/logs/%x_%A_%a.out
+#SBATCH --error=/projects/immunestatus/vdjrearm/irrmcodec/logs/%x_%A_%a.err
+
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
+cd ../
 
-python -m irrm_codec.train_inverse "$@"
+CHAINS=(TRB TRA TRG TRD IGH IGK IGL)
+CHAIN="${CHAINS[$SLURM_ARRAY_TASK_ID]}"
+CHAIN_LOWER="${CHAIN,,}"
+
+case "$CHAIN" in
+  TRA) LOCUS="alpha" ;;
+  TRB) LOCUS="beta" ;;
+  TRG) LOCUS="gamma" ;;
+  TRD) LOCUS="delta" ;;
+  IGH) LOCUS="heavy" ;;
+  IGK) LOCUS="kappa" ;;
+  IGL) LOCUS="lambda" ;;
+  *)
+    echo "Unsupported chain for locus mapping: $CHAIN" >&2
+    exit 1
+    ;;
+esac
+
+AIRR_DIR="/projects/immunestatus/vdjrearm/airr_format"
+EMBEDDINGS_DIR="/projects/immunestatus/vdjrearm/tcremp"
+LOG_DIR="/projects/immunestatus/vdjrearm/irrmcodec/logs"
+OUTPUT_ROOT="/projects/immunestatus/vdjrearm/irrmcodec/inverse_background_100k"
+
+AIRR_PATH="${AIRR_DIR}/${CHAIN_LOWER}_background_100k.tsv"
+EMBEDDINGS_PATH="${EMBEDDINGS_DIR}/${CHAIN_LOWER}_background_100k_tcremp.parquet"
+OUTPUT_DIR="${OUTPUT_ROOT}/${CHAIN_LOWER}"
+
+mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
+
+echo "job_id=${SLURM_JOB_ID:-local}"
+echo "array_task_id=${SLURM_ARRAY_TASK_ID:-0}"
+echo "chain=$CHAIN"
+echo "airr_path=$AIRR_PATH"
+echo "embeddings_path=$EMBEDDINGS_PATH"
+echo "output_dir=$OUTPUT_DIR"
+echo "locus=$LOCUS"
+
+"python" -m irrm_codec.train_inverse \
+  --airr-path "$AIRR_PATH" \
+  --embeddings-path "$EMBEDDINGS_PATH" \
+  --output-dir "$OUTPUT_DIR" \
+  --locus "$LOCUS" \
+  --clone-id-col clone_id \
+  --max-len 40 \
+  --batch-size 128 \
+  --epochs 40 \
+  --lr 3e-4 \
+  --weight-decay 1e-4 \
+  --train-fraction 0.8 \
+  --val-fraction 0.1 \
+  --seed 42 \
+  --log-interval 10
