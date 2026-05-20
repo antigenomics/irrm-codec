@@ -146,6 +146,28 @@ Notes:
 - The output table keeps the original AIRR columns and appends `pgen_1mm` and `log10_pgen_1mm`.
 - If `mirpy` is not installed into the environment, the script will also look for a local checkout at `../mirpy`.
 
+## Sequence to log10(pgen) regression
+
+Use the dedicated training module to fit a scalar regressor from CDR3 sequence to `log10_pgen_1mm`.
+
+Example:
+
+```bash
+python -m irrm_codec.train_pgen \
+  --airr-path artifacts/pgen/sample_airr_pgen.tsv \
+  --output-dir artifacts/pgen_model/trb \
+  --target-col log10_pgen_1mm \
+  --locus beta \
+  --batch-size 256 \
+  --epochs 40
+```
+
+Notes:
+
+- The model reuses the sequence encoder structure from the forward model and predicts one scalar per clonotype.
+- The training target is taken directly from the AIRR table, so pgen preprocessing must be run first.
+- Metrics include Huber loss, RMSE, and MAE.
+
 ## What the training scripts do
 
 Both training scripts:

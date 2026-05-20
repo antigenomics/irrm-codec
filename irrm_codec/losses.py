@@ -18,6 +18,10 @@ def inverse_loss(logits, target):
     )
 
 
+def pgen_loss(pred, target):
+    return F.huber_loss(pred, target, delta=0.5)
+
+
 def forward_metrics(pred, target):
     mse = F.mse_loss(pred, target).item()
     cosine = F.cosine_similarity(pred, target, dim=-1).mean().item()
@@ -38,6 +42,15 @@ def inverse_metrics(logits, target):
         "token_accuracy": token_accuracy,
         "length_accuracy": length_accuracy,
     }
+
+
+def pgen_metrics(pred, target):
+    with torch.no_grad():
+        diff = pred - target
+        mse = diff.pow(2).mean().item()
+        rmse = mse ** 0.5
+        mae = diff.abs().mean().item()
+    return {"mse": mse, "rmse": rmse, "mae": mae}
 
 
 def token_lengths_without_gaps(tokens):

@@ -52,3 +52,21 @@ Important environment variables:
 - `MIRPY_PATH`: optional local mirpy checkout, default `../mirpy`
 - `THREADS`: number of worker threads
 - `BATCH_SIZE`: sequences per inner batch
+
+`slurm/calc_pgen_1mm_background_100k_array.sbatch` computes `1mm pgen` for all seven chains
+in the default background-100k layout via a Slurm array.
+
+Run from the repository root:
+
+```bash
+sbatch slurm/calc_pgen_1mm_background_100k_array.sbatch
+```
+
+`slurm/train_pgen_background_100k_array.sbatch` trains one sequence-to-`log10_pgen_1mm` model
+per chain, assuming the pgen tables already exist.
+
+Run from the repository root:
+
+```bash
+sbatch slurm/train_pgen_background_100k_array.sbatch
+```

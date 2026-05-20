@@ -75,6 +75,34 @@ def validate_dataframe(df, emb_array, max_len=40, clone_id_col="clone_id"):
     }
 
 
+def validate_target_dataframe(df, target_array, max_len=40, clone_id_col="clone_id", target_name="target"):
+    target_array = np.asarray(target_array, dtype=np.float32)
+    if target_array.ndim != 1:
+        raise ValueError(f"Expected 1D target array, got shape {target_array.shape}.")
+    if target_array.shape[0] != len(df):
+        raise ValueError(
+            f"Target count {target_array.shape[0]} does not match dataframe length {len(df)}."
+        )
+    if not np.isfinite(target_array).all():
+        raise ValueError(f"Target array {target_name!r} contains NaN or infinite values.")
+
+    # Reuse sequence validation from the forward path with a lightweight dummy array.
+    base_stats = validate_dataframe(
+        df,
+        np.zeros((len(df), 1), dtype=np.float32),
+        max_len=max_len,
+        clone_id_col=clone_id_col,
+    )
+    return {
+        **base_stats,
+        "target_name": target_name,
+        "target_min": float(np.min(target_array)),
+        "target_max": float(np.max(target_array)),
+        "target_mean": float(np.mean(target_array)),
+        "target_std": float(np.std(target_array)),
+    }
+
+
 class ForwardDataset(Dataset):
     def __init__(self, df, emb_array, max_len=40):
         self.seqs = df["junction_aa"].tolist()
@@ -111,6 +139,24 @@ class InverseDataset(Dataset):
         }
 
 
+class PgenDataset(Dataset):
+    def __init__(self, df, target_array, max_len=40):
+        self.seqs = df["junction_aa"].tolist()
+        self.targets = np.asarray(target_array, dtype=np.float32)
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.seqs)
+
+    def __getitem__(self, idx):
+        tokens = encode(self.seqs[idx], self.max_len)
+        return {
+            "tokens": torch.tensor(tokens, dtype=torch.long),
+            "target": torch.tensor(self.targets[idx], dtype=torch.float32),
+            "length": len(tokens),
+        }
+
+
 def collate_forward(batch):
     tokens = torch.nn.utils.rnn.pad_sequence(
         [item["tokens"] for item in batch],
@@ -129,3 +175,15 @@ def collate_inverse(batch):
     target_mask = target.ne(PAD_ID)
     unk_fraction = target.eq(UNK_ID).logical_and(target_mask).float().sum() / target_mask.float().sum()
     return emb, target, unk_fraction
+
+
+def collate_pgen(batch):
+    tokens = torch.nn.utils.rnn.pad_sequence(
+        [item["tokens"] for item in batch],
+        batch_first=True,
+        padding_value=PAD_ID,
+    )
+    targets = torch.stack([item["target"] for item in batch])
+    lengths = torch.tensor([item["length"] for item in batch], dtype=torch.long)
+    mask = tokens.ne(PAD_ID)
+    return tokens, mask, targets, lengths
