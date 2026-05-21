@@ -27,6 +27,7 @@ pip install -r requirements.txt
 ```
 
 `requirements.txt` pins `torch==2.4.1` and adds the PyTorch `cu121` wheel index to avoid pulling newer CUDA 13 builds that may require a newer NVIDIA driver.
+For pgen workflows, it also installs `mirpy-lib`, the immunosequencing package published from `antigenomics/mirpy`.
 
 Update the environment after dependency changes:
 
@@ -125,7 +126,7 @@ Useful optional flags:
 ## 1mm pgen calculation
 
 Use the dedicated module to compute 1-mismatch pgen values through `mirpy`'s
-`mir.basic.pgen.OlgaModel.compute_pgen_cdr3aa_1mm`.
+`mir.basic.pgen.OlgaModel.compute_pgen_junction_aa_1mm`.
 
 Example:
 
@@ -134,6 +135,7 @@ python -m irrm_codec.calc_pgen_1mm \
   --airr-path data/sample_airr.tsv \
   --output-path artifacts/pgen/sample_airr_pgen.tsv \
   --chain TRB \
+  --species human \
   --locus beta \
   --threads 8 \
   --batch-size 1024
@@ -144,7 +146,7 @@ Notes:
 - The input AIRR file is split into contiguous chunks across `--threads`.
 - Each worker thread creates its OLGA model lazily and reuses it for all batches in that thread.
 - The output table keeps the original AIRR columns and appends `pgen_1mm` and `log10_pgen_1mm`.
-- If `mirpy` is not installed into the environment, the script will also look for a local checkout at `../mirpy`.
+- The code is compatible with the current `mirpy-lib` package and falls back to a local checkout at `../mirpy` when needed.
 
 ## Sequence to log10(pgen) regression
 

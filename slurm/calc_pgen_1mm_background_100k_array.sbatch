@@ -33,7 +33,7 @@ esac
 AIRR_DIR="/projects/immunestatus/vdjrearm/airr_format"
 LOG_DIR="/projects/immunestatus/vdjrearm/irrmcodec/logs"
 OUTPUT_ROOT="/projects/immunestatus/vdjrearm/pgen_1mm_background_100k"
-MIRPY_PATH="${MIRPY_PATH:-$(cd ../mirpy && pwd)}"
+MIRPY_PATH="${MIRPY_PATH:-}"
 
 AIRR_PATH="${AIRR_DIR}/${CHAIN_LOWER}_background_100k.tsv"
 OUTPUT_PATH="${OUTPUT_ROOT}/${CHAIN_LOWER}_background_100k_pgen.tsv"
@@ -43,6 +43,7 @@ mkdir -p "$OUTPUT_ROOT" "$LOG_DIR"
 echo "job_id=${SLURM_JOB_ID:-local}"
 echo "array_task_id=${SLURM_ARRAY_TASK_ID:-0}"
 echo "chain=$CHAIN"
+echo "species=human"
 echo "airr_path=$AIRR_PATH"
 echo "output_path=$OUTPUT_PATH"
 echo "locus=$LOCUS"
@@ -51,6 +52,7 @@ echo "locus=$LOCUS"
   --airr-path "$AIRR_PATH" \
   --output-path "$OUTPUT_PATH" \
   --chain "$CHAIN" \
+  --species human \
   --locus "$LOCUS" \
   --clone-id-col clone_id \
   --cdr3-col junction_aa \

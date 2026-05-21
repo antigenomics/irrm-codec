@@ -47,6 +47,7 @@ Important environment variables:
 - `AIRR_PATH`: input AIRR table
 - `OUTPUT_PATH`: output file (`.tsv`, `.airr`, `.csv`, or `.parquet`)
 - `CHAIN`: OLGA chain name, default `TRB`
+- `SPECIES`: OLGA species name, default `human`
 - `LOCUS`: optional AIRR locus filter
 - `MODEL_PATH`: optional explicit OLGA model directory
 - `MIRPY_PATH`: optional local mirpy checkout, default `../mirpy`

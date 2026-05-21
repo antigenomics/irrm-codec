@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import math
+import inspect
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +42,7 @@ def parse_args():
     parser.add_argument("--output-stats-path")
     parser.add_argument("--locus")
     parser.add_argument("--chain", default="TRB")
+    parser.add_argument("--species", default="human")
     parser.add_argument("--model-path")
     parser.add_argument("--clone-id-col", default="clone_id")
     parser.add_argument("--cdr3-col", default="junction_aa")
@@ -84,7 +86,7 @@ def _import_olga_model_class(mirpy_path=None):
             return OlgaModel
         raise ModuleNotFoundError(
             "Failed to import mir.basic.pgen.OlgaModel. "
-            "Install mirpy in the environment or pass --mirpy-path to a local checkout."
+            "Install mirpy-lib in the environment or pass --mirpy-path to a local checkout."
         )
 
 
@@ -107,30 +109,74 @@ def _chunk_bounds(num_items, num_chunks):
     return bounds
 
 
-def _get_thread_model(chain, model_path, is_d_present, mirpy_path):
-    cache_key = (chain.upper(), model_path, is_d_present, mirpy_path)
+def _build_olga_model(OlgaModel, chain, species, model_path, is_d_present):
+    signature = inspect.signature(OlgaModel.__init__)
+    parameter_names = set(signature.parameters)
+
+    if "locus" in parameter_names:
+        kwargs = {"locus": chain.upper(), "species": species.lower()}
+        if model_path:
+            kwargs["model"] = model_path
+        if is_d_present is not None:
+            kwargs["is_d_present"] = is_d_present
+        return OlgaModel(**kwargs)
+
+    kwargs = {"chain": chain.upper()}
+    if model_path:
+        kwargs["model"] = model_path
+    if is_d_present is not None:
+        kwargs["is_d_present"] = is_d_present
+    return OlgaModel(**kwargs)
+
+
+def _compute_pgen_1mm(model, seq):
+    if hasattr(model, "compute_pgen_junction_aa_1mm"):
+        return model.compute_pgen_junction_aa_1mm(seq)
+    if hasattr(model, "compute_pgen_cdr3aa_1mm"):
+        return model.compute_pgen_cdr3aa_1mm(seq)
+    raise AttributeError(
+        "OlgaModel does not provide a supported 1mm pgen method. "
+        "Expected compute_pgen_junction_aa_1mm or compute_pgen_cdr3aa_1mm."
+    )
+
+
+def _get_thread_model(chain, species, model_path, is_d_present, mirpy_path):
+    cache_key = (chain.upper(), species.lower(), model_path, is_d_present, mirpy_path)
     model_cache = getattr(_thread_state, "model_cache", None)
     if model_cache is None:
         model_cache = {}
         _thread_state.model_cache = model_cache
     if cache_key not in model_cache:
         OlgaModel = _import_olga_model_class(mirpy_path)
-        model_cache[cache_key] = OlgaModel(
-            model=model_path,
+        model_cache[cache_key] = _build_olga_model(
+            OlgaModel=OlgaModel,
             chain=chain,
+            species=species,
+            model_path=model_path,
             is_d_present=is_d_present,
         )
     return model_cache[cache_key]
 
 
-def _compute_chunk(chunk_id, start, end, sequences, chain, model_path, is_d_present, mirpy_path, batch_size):
-    model = _get_thread_model(chain, model_path, is_d_present, mirpy_path)
+def _compute_chunk(
+    chunk_id,
+    start,
+    end,
+    sequences,
+    chain,
+    species,
+    model_path,
+    is_d_present,
+    mirpy_path,
+    batch_size,
+):
+    model = _get_thread_model(chain, species, model_path, is_d_present, mirpy_path)
     values = np.empty(end - start, dtype=np.float64)
     offset = 0
     for batch_start in range(start, end, batch_size):
         batch_end = min(batch_start + batch_size, end)
         for seq in sequences[batch_start:batch_end]:
-            values[offset] = model.compute_pgen_cdr3aa_1mm(seq)
+            values[offset] = _compute_pgen_1mm(model, seq)
             offset += 1
     return chunk_id, start, values
 
@@ -168,6 +214,7 @@ def _read_and_filter_airr(args):
         "rows_after_locus_filter": int(len(df)),
         "locus": locus,
         "chain": args.chain.upper(),
+        "species": args.species.lower(),
         "cdr3_column": args.cdr3_col,
         "clone_id_column": args.clone_id_col,
     }
@@ -237,6 +284,7 @@ def main():
                 end,
                 sequences,
                 args.chain,
+                args.species,
                 args.model_path,
                 is_d_present,
                 args.mirpy_path,
