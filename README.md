@@ -27,7 +27,9 @@ pip install -r requirements.txt
 ```
 
 `requirements.txt` pins `torch==2.4.1` and adds the PyTorch `cu121` wheel index to avoid pulling newer CUDA 13 builds that may require a newer NVIDIA driver.
-For pgen workflows, it also installs `mirpy-lib`, the immunosequencing package published from `antigenomics/mirpy`.
+For pgen workflows, `requirements.txt` installs `mirpy-lib` directly from the
+`antigenomics/mirpy` GitHub repository because the required API is newer than the
+currently usable PyPI release in this workflow.
 
 Update the environment after dependency changes:
 
