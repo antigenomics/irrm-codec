@@ -46,7 +46,7 @@ def parse_args():
     parser.add_argument("--model-path")
     parser.add_argument("--clone-id-col", default="clone_id")
     parser.add_argument("--cdr3-col", default="junction_aa")
-    parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--threads", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--pgen-col", default="pgen_1mm")
     parser.add_argument("--log10-pgen-col", default="log10_pgen_1mm")

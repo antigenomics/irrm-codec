@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=irrm-pgen-1mm
 #SBATCH --partition=short
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
 #SBATCH --output=slurm/logs/%x-%j.out
@@ -23,7 +23,7 @@ MODEL_PATH="${MODEL_PATH:-}"
 MIRPY_PATH="${MIRPY_PATH:-}"
 CLONE_ID_COL="${CLONE_ID_COL:-clone_id}"
 CDR3_COL="${CDR3_COL:-junction_aa}"
-THREADS="${THREADS:-${SLURM_CPUS_PER_TASK:-8}}"
+THREADS="${THREADS:-${SLURM_CPUS_PER_TASK:-32}}"
 BATCH_SIZE="${BATCH_SIZE:-1024}"
 PGEN_COL="${PGEN_COL:-pgen_1mm}"
 LOG10_PGEN_COL="${LOG10_PGEN_COL:-log10_pgen_1mm}"

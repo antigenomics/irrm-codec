@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=irrm-pgen-1mm-bg100k
 #SBATCH --partition=short
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=32G
 #SBATCH --time=06:00:00
 #SBATCH --array=0-6
@@ -56,6 +56,6 @@ echo "locus=$LOCUS"
   --locus "$LOCUS" \
   --clone-id-col clone_id \
   --cdr3-col junction_aa \
-  --threads "${SLURM_CPUS_PER_TASK:-8}" \
+  --threads "${SLURM_CPUS_PER_TASK:-32}" \
   --batch-size 2048 \
   --mirpy-path "$MIRPY_PATH"
