@@ -29,7 +29,7 @@ def parse_args():
     p.add_argument("--clone-id-col", default="clone_id")
     p.add_argument("--cdr3-col", default="junction_aa")
     p.add_argument("--threads", type=int, default=32)
-    p.add_argument("--chunk-size", type=int, default=1000)
+    p.add_argument("--chunk-size", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=1024, help=argparse.SUPPRESS)
     p.add_argument("--exact-pgen-col", default="pgen")
     p.add_argument("--pgen-col", default="pgen_1mm")
@@ -96,12 +96,6 @@ def _chunk_dir(output_path):
 
 def _chunk_path(output_path, chunk_id):
     return _chunk_dir(output_path) / f"chunk_{chunk_id:04d}.tsv"
-
-
-def _save_json(path, payload):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _log10(x):
@@ -247,19 +241,6 @@ def main():
         (done if _read_chunk(cfg["output_path"], chunk_id, sequences[start:end], cols) else pending).append(
             (chunk_id, start, end)
         )
-    progress = {
-        **stats,
-        "chain": cfg["chain"].upper(),
-        "species": cfg["species"].lower(),
-        "rows_total": int(len(df)),
-        "workers_requested": int(args.threads),
-        "workers_active": int(min(len(pending), args.threads)) if pending else 0,
-        "chunk_size": int(args.chunk_size),
-        "chunk_count": int(len(bounds)),
-        "completed_chunks": [x[0] if isinstance(x, tuple) else x for x in done],
-        "pending_chunks": [x[0] for x in pending],
-    }
-    _save_json(_chunk_dir(cfg["output_path"]) / "progress.json", progress)
     log.info("loaded rows=%d pending_chunks=%d workers=%d", len(df), len(pending), args.threads)
     if pending:
         jobs = [[] for _ in range(min(len(pending), args.threads))]
@@ -276,9 +257,6 @@ def main():
                     raise
                 log.info("worker completed chunks=%d", len(worker_done))
                 done.extend((chunk_id, None, None) for chunk_id in worker_done)
-                progress["completed_chunks"] = sorted({x[0] if isinstance(x, tuple) else x for x in done})
-                progress["pending_chunks"] = [i for i in range(len(bounds)) if i not in set(progress["completed_chunks"])]
-                _save_json(_chunk_dir(cfg["output_path"]) / "progress.json", progress)
     exact_log = np.empty(len(df), dtype=np.float64)
     mm_log = np.empty(len(df), dtype=np.float64)
     for chunk_id, (start, end) in enumerate(bounds):
@@ -300,22 +278,33 @@ def main():
     else:
         raise ValueError(f"Unsupported output extension {suffix!r}.")
     stats_path = Path(args.output_stats_path) if args.output_stats_path else cfg["output_path"].with_suffix(cfg["output_path"].suffix + ".stats.json")
-    _save_json(
-        stats_path,
-        {
-            **progress,
-            "output_path": str(cfg["output_path"].resolve()),
-            "stats_path": str(stats_path.resolve()),
-            "rows_written": int(len(out)),
-            "model_path": str(Path(cfg["model_path"]).resolve()) if cfg["model_path"] else None,
-            "mirpy_path": str(Path(cfg["mirpy_path"]).resolve()) if cfg["mirpy_path"] else None,
-            "is_d_present": cfg["is_d_present"],
-            "chunk_store_dir": str(_chunk_dir(cfg["output_path"]).resolve()),
-            "exact_pgen_column": args.exact_pgen_col,
-            "pgen_column": args.pgen_col,
-            "exact_log10_pgen_column": args.exact_log10_pgen_col,
-            "log10_pgen_column": args.log10_pgen_col,
-        },
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    stats_path.write_text(
+        json.dumps(
+            {
+                **stats,
+                "chain": cfg["chain"].upper(),
+                "species": cfg["species"].lower(),
+                "rows_total": int(len(df)),
+                "rows_written": int(len(out)),
+                "workers_requested": int(args.threads),
+                "chunk_size": int(args.chunk_size),
+                "chunk_count": int(len(bounds)),
+                "completed_chunks": sorted({x[0] if isinstance(x, tuple) else x for x in done}),
+                "output_path": str(cfg["output_path"].resolve()),
+                "stats_path": str(stats_path.resolve()),
+                "model_path": str(Path(cfg["model_path"]).resolve()) if cfg["model_path"] else None,
+                "mirpy_path": str(Path(cfg["mirpy_path"]).resolve()) if cfg["mirpy_path"] else None,
+                "is_d_present": cfg["is_d_present"],
+                "chunk_store_dir": str(_chunk_dir(cfg["output_path"]).resolve()),
+                "exact_pgen_column": args.exact_pgen_col,
+                "pgen_column": args.pgen_col,
+                "exact_log10_pgen_column": args.exact_log10_pgen_col,
+                "log10_pgen_column": args.log10_pgen_col,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
     )
     log.info("saved output=%s", cfg["output_path"].resolve())
 
