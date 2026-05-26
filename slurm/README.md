@@ -30,3 +30,52 @@ If your cluster needs a different queue or resources, edit the `#SBATCH` lines a
 - `--time`
 
 Logs go to `slurm/logs/`.
+
+`slurm/calc_pgen_1mm.sbatch` runs 1-mismatch pgen calculation on an AIRR table using
+`mirpy`'s OLGA wrapper.
+
+The default Slurm resources are now:
+
+- partition: `medium`
+- time limit: `08:00:00`
+- CPUs per task: `32`
+- memory: `32G`
+
+Example:
+
+```bash
+sbatch \
+  --export=ALL,AIRR_PATH=/projects/immunestatus/vdjrearm/airr_format/trb_background_100k.tsv,OUTPUT_PATH=/projects/immunestatus/vdjrearm/pgen/trb_background_100k_pgen.tsv,CHAIN=TRB,LOCUS=beta,THREADS=8,BATCH_SIZE=2048,PYTHON_BIN=/home/evlasova/.conda/envs/irrm-codec/bin/python \
+  slurm/calc_pgen_1mm.sbatch
+```
+
+Important environment variables:
+
+- `AIRR_PATH`: input AIRR table
+- `OUTPUT_PATH`: output file (`.tsv`, `.airr`, `.csv`, or `.parquet`)
+- `CHAIN`: OLGA chain name, default `TRB`
+- `SPECIES`: OLGA species name, default `human`
+- `LOCUS`: optional AIRR locus filter
+- `MODEL_PATH`: optional explicit OLGA model directory
+- `MIRPY_PATH`: optional local mirpy checkout, default `../mirpy`
+- `THREADS`: number of worker threads
+- `CHUNK_SIZE`: sequences per saved chunk, default `1000`
+- `BATCH_SIZE`: sequences per inner batch
+
+`slurm/calc_pgen_1mm_background_100k_array.sbatch` computes `1mm pgen` for all seven chains
+in the default background-100k layout via a Slurm array.
+
+Run from the repository root:
+
+```bash
+sbatch slurm/calc_pgen_1mm_background_100k_array.sbatch
+```
+
+`slurm/train_pgen_background_100k_array.sbatch` trains one sequence-to-`log10_pgen_1mm` model
+per chain, assuming the pgen tables already exist.
+
+Run from the repository root:
+
+```bash
+sbatch slurm/train_pgen_background_100k_array.sbatch
+```

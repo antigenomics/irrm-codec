@@ -27,6 +27,9 @@ pip install -r requirements.txt
 ```
 
 `requirements.txt` pins `torch==2.4.1` and adds the PyTorch `cu121` wheel index to avoid pulling newer CUDA 13 builds that may require a newer NVIDIA driver.
+For pgen workflows, `requirements.txt` installs `mirpy-lib` directly from the
+`antigenomics/mirpy` GitHub repository because the required API is newer than the
+currently usable PyPI release in this workflow.
 
 Update the environment after dependency changes:
 
@@ -122,6 +125,55 @@ Useful optional flags:
 - `--log-interval 10`
 - `--no-progress`
 
+## 1mm pgen calculation
+
+Use the dedicated module to compute 1-mismatch pgen values through `mirpy`'s
+`mir.basic.pgen.OlgaModel.compute_pgen_junction_aa_1mm`.
+
+Example:
+
+```bash
+python -m irrm_codec.calc_pgen_1mm \
+  --airr-path data/sample_airr.tsv \
+  --output-path artifacts/pgen/sample_airr_pgen.tsv \
+  --chain TRB \
+  --species human \
+  --locus beta \
+  --threads 8 \
+  --chunk-size 1000
+```
+
+Notes:
+
+- `--threads` controls how many independent worker processes run in parallel.
+- Each worker gets its own contiguous part of the filtered AIRR table, reads the AIRR file inside the child process, and never receives a shared in-memory sequence list from the parent.
+- `--chunk-size` controls how many sequences a worker processes before flushing an intermediate result chunk to disk.
+- Completed chunks are reused on rerun, so a killed job resumes from the last successful on-disk save.
+- The output table keeps the original AIRR columns and appends `pgen_1mm` and `log10_pgen_1mm`.
+- The code is compatible with the current `mirpy-lib` package and falls back to a local checkout at `../mirpy` when needed.
+
+## Sequence to log10(pgen) regression
+
+Use the dedicated training module to fit a scalar regressor from CDR3 sequence to `log10_pgen_1mm`.
+
+Example:
+
+```bash
+python -m irrm_codec.train_pgen \
+  --airr-path artifacts/pgen/sample_airr_pgen.tsv \
+  --output-dir artifacts/pgen_model/trb \
+  --target-col log10_pgen_1mm \
+  --locus beta \
+  --batch-size 256 \
+  --epochs 40
+```
+
+Notes:
+
+- The model reuses the sequence encoder structure from the forward model and predicts one scalar per clonotype.
+- The training target is taken directly from the AIRR table, so pgen preprocessing must be run first.
+- Metrics include Huber loss, RMSE, and MAE.
+
 ## What the training scripts do
 
 Both training scripts:
@@ -162,6 +214,7 @@ The example notebook [notebooks/example_run_and_analysis.ipynb](/c:/Users/lizzka
 
 ## Notes
 
-- The current inverse model uses greedy autoregressive decoding.
+- The inverse model predicts the full fixed-length token sequence of length 40 in parallel.
 - The current pipeline expects one chain at a time and uses `locus` filtering to select it.
+- By default, CDR3 sequences are converted to fixed length 40 before tokenization by inserting `-` gaps after residue 4 and before the last 3 residues.
 - Training outputs are intentionally ignored by git via [`.gitignore`](/c:/Users/lizzka239/projects/irrm-codec/.gitignore#L1).
