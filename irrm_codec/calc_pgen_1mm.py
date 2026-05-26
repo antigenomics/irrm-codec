@@ -109,17 +109,22 @@ def _log10(x):
 
 
 def _import_olga(cfg):
+    log = logging.getLogger("irrm_codec.calc_pgen_1mm")
+    log.info("importing OlgaModel mirpy_path=%s", cfg["mirpy_path"] or "<default>")
     try:
         from mir.basic.pgen import OlgaModel
+        log.info("imported OlgaModel from installed package")
         return OlgaModel
     except ModuleNotFoundError:
         if cfg["mirpy_path"]:
             mirpy = Path(cfg["mirpy_path"]).resolve()
         else:
             mirpy = Path(__file__).resolve().parents[2] / "mirpy"
+        log.info("installed package missing, trying local mirpy path=%s", mirpy)
         if mirpy.exists():
             sys.path.insert(0, str(mirpy))
             from mir.basic.pgen import OlgaModel
+            log.info("imported OlgaModel from local mirpy path=%s", mirpy)
             return OlgaModel
         raise
 
@@ -127,6 +132,14 @@ def _import_olga(cfg):
 def _model(cfg):
     key = tuple(cfg[k] for k in ("chain", "species", "model_path", "is_d_present", "mirpy_path"))
     if key not in _MODEL_CACHE:
+        log = logging.getLogger("irrm_codec.calc_pgen_1mm")
+        log.info(
+            "building OlgaModel chain=%s species=%s model_path=%s is_d_present=%s",
+            cfg["chain"],
+            cfg["species"],
+            cfg["model_path"] or "<default>",
+            cfg["is_d_present"],
+        )
         OlgaModel = _import_olga(cfg)
         sig = set(inspect.signature(OlgaModel.__init__).parameters)
         kwargs = {"species": cfg["species"].lower(), "model": cfg["model_path"]}
@@ -138,6 +151,7 @@ def _model(cfg):
         if cfg["is_d_present"] is not None:
             kwargs["is_d_present"] = cfg["is_d_present"]
         _MODEL_CACHE[key] = OlgaModel(**kwargs)
+        log.info("OlgaModel ready chain=%s", cfg["chain"])
     return _MODEL_CACHE[key]
 
 
@@ -171,21 +185,33 @@ def _write_chunk(output_path, chunk_id, seqs, exact, mm, cols):
 
 
 def _worker(worker_id, jobs, cfg):
+    _logger(cfg["log_path"])
     log = logging.getLogger("irrm_codec.calc_pgen_1mm")
+    log.info("worker=%d started jobs=%d", worker_id, len(jobs))
+    log.info("worker=%d loading AIRR from %s", worker_id, cfg["airr_path"])
     _, sequences, _ = _load_airr(cfg["airr_path"], cfg["clone_id_col"], cfg["cdr3_col"], cfg["locus"])
+    log.info("worker=%d loaded sequences=%d", worker_id, len(sequences))
     model = _model(cfg)
     cols = [cfg["cdr3_col"], cfg["exact_log10_pgen_col"], cfg["log10_pgen_col"]]
     done = []
     for chunk_id, start, end in jobs:
         seqs = sequences[start:end]
+        log.info("worker=%d entering chunk=%d start=%d end=%d", worker_id, chunk_id, start, end)
         if _read_chunk(cfg["output_path"], chunk_id, seqs, cols) is None:
+            log.info("worker=%d computing chunk=%d rows=%d", worker_id, chunk_id, len(seqs))
             exact = np.empty(len(seqs), dtype=np.float64)
             mm = np.empty(len(seqs), dtype=np.float64)
             for i, seq in enumerate(seqs):
+                if i == 0:
+                    log.info("worker=%d computing first sequence for chunk=%d seq_len=%d", worker_id, chunk_id, len(seq))
                 exact[i], mm[i] = _compute(model, seq)
+            log.info("worker=%d writing chunk=%d", worker_id, chunk_id)
             _write_chunk(cfg["output_path"], chunk_id, seqs, exact, mm, cols)
             log.info("worker=%d saved chunk=%d rows=%d", worker_id, chunk_id, len(seqs))
+        else:
+            log.info("worker=%d reused chunk=%d", worker_id, chunk_id)
         done.append(chunk_id)
+    log.info("worker=%d finished", worker_id)
     return done
 
 
@@ -193,7 +219,8 @@ def main():
     args = parse_args()
     if args.threads < 1:
         raise ValueError("--threads must be >= 1.")
-    log = _logger(args.log_path or str(Path(args.output_path).with_suffix(Path(args.output_path).suffix + ".log")))
+    log_path = args.log_path or str(Path(args.output_path).with_suffix(Path(args.output_path).suffix + ".log"))
+    log = _logger(log_path)
     cfg = {
         "airr_path": args.airr_path,
         "output_path": Path(args.output_path),
@@ -207,8 +234,12 @@ def main():
         "mirpy_path": args.mirpy_path,
         "exact_log10_pgen_col": args.exact_log10_pgen_col,
         "log10_pgen_col": args.log10_pgen_col,
+        "log_path": log_path,
     }
+    log.info("starting 1mm pgen calculation")
+    log.info("loading AIRR in parent from %s", cfg["airr_path"])
     df, sequences, stats = _load_airr(cfg["airr_path"], cfg["clone_id_col"], cfg["cdr3_col"], cfg["locus"])
+    log.info("parent loaded rows=%d", len(df))
     bounds = _chunk_bounds(len(df), args.chunk_size)
     cols = [cfg["cdr3_col"], cfg["exact_log10_pgen_col"], cfg["log10_pgen_col"]]
     done, pending = [], []
@@ -234,6 +265,7 @@ def main():
         jobs = [[] for _ in range(min(len(pending), args.threads))]
         for i, job in enumerate(pending):
             jobs[i % len(jobs)].append(job)
+        log.info("dispatching workers=%d pending_chunks=%d", len(jobs), len(pending))
         with ProcessPoolExecutor(max_workers=len(jobs), mp_context=multiprocessing.get_context("spawn")) as ex:
             futures = [ex.submit(_worker, i, job_group, cfg) for i, job_group in enumerate(jobs) if job_group]
             for fut in as_completed(futures):
@@ -242,6 +274,7 @@ def main():
                 except Exception:
                     log.exception("worker execution failed")
                     raise
+                log.info("worker completed chunks=%d", len(worker_done))
                 done.extend((chunk_id, None, None) for chunk_id in worker_done)
                 progress["completed_chunks"] = sorted({x[0] if isinstance(x, tuple) else x for x in done})
                 progress["pending_chunks"] = [i for i in range(len(bounds)) if i not in set(progress["completed_chunks"])]
