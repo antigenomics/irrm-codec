@@ -142,8 +142,8 @@ def _model(cfg):
 
 
 def _compute(model, seq):
-    exact_fn = getattr(model, "compute_pgen_junction_aa", getattr(model, "compute_pgen_cdr3aa"))
-    mm_fn = getattr(model, "compute_pgen_junction_aa_1mm", getattr(model, "compute_pgen_cdr3aa_1mm"))
+    exact_fn = getattr(model, "compute_pgen_junction_aa", None) or getattr(model, "compute_pgen_cdr3aa")
+    mm_fn = getattr(model, "compute_pgen_junction_aa_1mm", None) or getattr(model, "compute_pgen_cdr3aa_1mm")
     return exact_fn(seq), mm_fn(seq)
 
 
@@ -237,7 +237,12 @@ def main():
         with ProcessPoolExecutor(max_workers=len(jobs), mp_context=multiprocessing.get_context("spawn")) as ex:
             futures = [ex.submit(_worker, i, job_group, cfg) for i, job_group in enumerate(jobs) if job_group]
             for fut in as_completed(futures):
-                done.extend((chunk_id, None, None) for chunk_id in fut.result())
+                try:
+                    worker_done = fut.result()
+                except Exception:
+                    log.exception("worker execution failed")
+                    raise
+                done.extend((chunk_id, None, None) for chunk_id in worker_done)
                 progress["completed_chunks"] = sorted({x[0] if isinstance(x, tuple) else x for x in done})
                 progress["pending_chunks"] = [i for i in range(len(bounds)) if i not in set(progress["completed_chunks"])]
                 _save_json(_chunk_dir(cfg["output_path"]) / "progress.json", progress)
