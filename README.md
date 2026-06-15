@@ -7,13 +7,15 @@ Immune Receptor Rearrangement Model-based enCOder DECoder (IRRM-CODEC).
 - forward model: predicts a TCRemP embedding from CDR3 sequence input
 - inverse model: reconstructs a CDR3 sequence from a TCRemP embedding
 
-The repository is organized as a small training package with shell entrypoints and a notebook for quick inspection of results.
+The repository is organized as a small training package with Python entrypoints, Slurm launchers, and analysis notebooks for both single-run and multi-chain workflows.
 
 ## Repository layout
 
 - `irrm_codec/`: package with data loading, tokenization, datasets, models, losses, utilities and training entrypoints
-- `scripts/`: shell wrappers for launching training
-- `notebooks/`: example notebook for running training and analyzing saved metrics
+- `scripts/`: operational launchers; `train_forward.sh` and `train_inverse.sh` are Slurm array jobs for the seven background-100k chains, while `calc_pgen_1mm.sh` and `train_pgen.sh` are local bash wrappers around the Python modules
+- `slurm/`: additional single-job and array-job `sbatch` examples plus `slurm/README.md` with cluster usage notes
+- `notebooks/`: runnable notebooks for training walkthroughs, artifact inspection, pgen analysis, and cross-chain summaries
+- `notebooks/projects/immunestatus/vdjrearm/airr_format/`: checked-in AIRR examples used by some notebooks as local fallback inputs
 - `artifacts/`: default output directory for checkpoints and run metadata
 
 ## Environment setup
@@ -32,6 +34,10 @@ For pgen workflows, `requirements.txt` installs `mirpy-lib` directly from the
 currently usable PyPI release in this workflow.
 
 Update the environment after dependency changes:
+
+```bash
+pip install -r requirements.txt --upgrade
+```
 
 Register the environment as a Jupyter kernel:
 
@@ -80,44 +86,45 @@ If AIRR contains `clone_id`, the AIRR table and embeddings table are merged by `
 
 ## Training
 
-### Forward model
+Run the training modules directly for local or notebook-driven experiments:
 
 ```bash
-bash scripts/train_forward.sh \
+python -m irrm_codec.train_forward \
   --airr-path data/sample_airr.tsv \
   --embeddings-path data/sample_embeddings.parquet \
   --locus alpha \
   --output-dir artifacts/forward
-```
 
-### Inverse model
-
-```bash
-bash scripts/train_inverse.sh \
+python -m irrm_codec.train_inverse \
   --airr-path data/sample_airr.tsv \
   --embeddings-path data/sample_embeddings.parquet \
   --locus alpha \
   --output-dir artifacts/inverse
 ```
 
-You can also run the modules directly:
+For cluster runs, use the Slurm launchers:
+
+- `scripts/train_forward.sh`: 7-chain array job for forward training on the background-100k layout
+- `scripts/train_inverse.sh`: 7-chain array job for inverse training on the background-100k layout
+- `slurm/train_forward.sbatch`: single forward run with overridable paths and hyperparameters
+- `slurm/train_pgen_background_100k_array.sbatch`: array launcher for one pgen regressor per chain after pgen preprocessing
+
+Examples:
 
 ```bash
-python -m irrm_codec.train_forward \
-  --airr-path data/sample_airr.tsv \
-  --embeddings-path data/sample_embeddings.parquet \
-  --locus alpha
-
-python -m irrm_codec.train_inverse \
-  --airr-path data/sample_airr.tsv \
-  --embeddings-path data/sample_embeddings.parquet \
-  --locus alpha
+sbatch scripts/train_forward.sh
+sbatch scripts/train_inverse.sh
 ```
 
 Useful optional flags:
 
 - `--clone-id-col clone_id`
 - `--embedding-column tcremp_emb`
+- `--wandb-project irrm-codec`
+- `--wandb-entity ...`
+- `--wandb-run-name ...`
+- `--wandb-dir ...`
+- `--wandb-mode online|offline|disabled`
 - `--max-len 40`
 - `--batch-size ...`
 - `--epochs ...`
@@ -152,6 +159,16 @@ Notes:
 - The output table keeps the original AIRR columns and appends `pgen_1mm` and `log10_pgen_1mm`.
 - The code is compatible with the current `mirpy-lib` package and falls back to a local checkout at `../mirpy` when needed.
 
+The matching local bash wrapper is:
+
+```bash
+AIRR_PATH=data/sample_airr.tsv \
+OUTPUT_PATH=artifacts/pgen/sample_airr_pgen.tsv \
+CHAIN=TRB \
+LOCUS=beta \
+bash scripts/calc_pgen_1mm.sh
+```
+
 ## Sequence to log10(pgen) regression
 
 Use the dedicated training module to fit a scalar regressor from CDR3 sequence to `log10_pgen_1mm`.
@@ -173,10 +190,20 @@ Notes:
 - The model reuses the sequence encoder structure from the forward model and predicts one scalar per clonotype.
 - The training target is taken directly from the AIRR table, so pgen preprocessing must be run first.
 - Metrics include Huber loss, RMSE, and MAE.
+- W&B logging can be configured with `--wandb-project`, `--wandb-entity`, `--wandb-run-name`, `--wandb-dir`, and `--wandb-mode`.
 
-## What the training scripts do
+The matching local bash wrapper is:
 
-Both training scripts:
+```bash
+AIRR_PATH=artifacts/pgen/sample_airr_pgen.tsv \
+OUTPUT_DIR=artifacts/pgen_model/trb \
+LOCUS=beta \
+bash scripts/train_pgen.sh
+```
+
+## What the forward and inverse training scripts do
+
+The forward and inverse training modules:
 
 - load AIRR and embeddings from separate files
 - align them by `clone_id` or by row order when `clone_id` is absent and row counts match
@@ -187,10 +214,28 @@ Both training scripts:
 - save normalization parameters for later inference
 - save both the best and the latest model checkpoints
 - write per-epoch history and final test metrics
+- log train, validation, and test metrics to Weights & Biases
+
+The pgen regressor follows the same split, checkpoint, and metrics pattern, but it reads a single AIRR table with a target column instead of a separate embeddings parquet and it does not save embedding normalization arrays.
+
+For remote runs, configure W&B with environment variables before launching training:
+
+```bash
+export WANDB_API_KEY=...
+export WANDB_ENTITY=...
+export WANDB_PROJECT=irrm-codec
+```
+
+If the server cannot reach the internet during training, you can log locally first and sync later:
+
+```bash
+export WANDB_MODE=offline
+wandb sync path/to/wandb/offline-run
+```
 
 ## Saved artifacts
 
-Each run writes to its output directory, for example `artifacts/forward` or `artifacts/inverse`.
+Forward and inverse runs write to their output directories, for example `artifacts/forward` or `artifacts/inverse`.
 
 Saved files:
 
@@ -202,15 +247,189 @@ Saved files:
 - `test_metrics.json`: final metrics on the test split
 - `data_stats.json`: dataset summary, merge statistics and artifact paths
 
-## Notebook
+Pgen runs follow the same layout except that they do not write `mean.npy` and `std.npy`.
 
-The example notebook [notebooks/example_run_and_analysis.ipynb](/c:/Users/lizzka239/projects/irrm-codec/notebooks/example_run_and_analysis.ipynb) shows how to:
+## Where to find trained models
 
-- inspect AIRR and embeddings inputs
-- launch a training run from Python
-- read saved metric files
-- plot learning curves
-- restore a checkpoint
+If you ran training locally from the CLI or notebooks, look in the output directory you passed with `--output-dir`. The defaults and common examples in this repository are:
+
+- forward demo run: `artifacts/forward` or `artifacts/forward_demo_trb`
+- inverse demo run: `artifacts/inverse` or `artifacts/inverse_demo_trb`
+- pgen demo run: `artifacts/pgen_model/trb`
+
+If you ran the cluster launchers that are currently checked into the repo, the model roots are:
+
+- forward background-100k array runs: `/projects/immunestatus/vdjrearm/irrmcodec/forward_background_100k/<chain>`
+- inverse background-100k array runs: `/projects/immunestatus/vdjrearm/irrmcodec/inverse_background_100k/<chain>`
+- pgen background-100k array runs: `/projects/immunestatus/vdjrearm/irrmcodec/pgen_background_100k/<chain>`
+
+For example:
+
+- `/projects/immunestatus/vdjrearm/irrmcodec/forward_background_100k/trb`
+- `/projects/immunestatus/vdjrearm/irrmcodec/inverse_background_100k/trb`
+- `/projects/immunestatus/vdjrearm/irrmcodec/pgen_background_100k/trb`
+
+Supported chain directory names in the multi-chain runs are:
+
+- `igh`
+- `igk`
+- `igl`
+- `tra`
+- `trb`
+- `trd`
+- `trg`
+
+Inside each model directory, the main files to look for are `best.pt` and `last.pt`. The surrounding metadata is stored alongside them: `history.json`, `test_metrics.json`, `data_stats.json`, and for forward/inverse also `mean.npy` and `std.npy`.
+
+## Results
+
+The committed `main` branch already contains executed summary notebooks for:
+
+- forward multi-chain evaluation: `notebooks/forward_background_100k_multichain_analysis.ipynb`
+- inverse multi-chain evaluation: `notebooks/inverse_background_100k_multichain_analysis.ipynb`
+- pgen regression quality and inference speed: `notebooks/pgen_run_and_analysis.ipynb`
+
+### Forward model on background-100k
+
+Cross-chain summary over `igh`, `igk`, `igl`, `tra`, `trb`, `trd`, `trg`:
+
+- mean recomputed test loss: `0.1741`
+- mean recomputed test cosine: `0.8871`
+- best cosine: `trg = 0.9323`, closely followed by `trd = 0.9320` and `igl = 0.9202`
+- lowest recomputed test loss: `trd = 0.0805`
+- hardest chains in this sweep: `igh` (`cosine = 0.7906`) and `trb` (`eval_test_loss = 0.2868`)
+
+| chain | epochs_ran | best_val_loss | eval_test_loss | eval_test_cosine |
+| --- | ---: | ---: | ---: | ---: |
+| igh | 27 | 0.2669 | 0.2668 | 0.7906 |
+| igk | 30 | 0.1968 | 0.1987 | 0.8712 |
+| igl | 23 | 0.1411 | 0.1381 | 0.9202 |
+| tra | 39 | 0.1473 | 0.1484 | 0.9035 |
+| trb | 40 | 0.1871 | 0.2868 | 0.8599 |
+| trd | 36 | 0.0775 | 0.0805 | 0.9320 |
+| trg | 35 | 0.0981 | 0.0995 | 0.9323 |
+
+Training dynamics and test distributions across chains:
+
+![Forward training overview](docs/results/forward_training_overview.png)
+
+### Inverse model on background-100k
+
+Cross-chain summary over the same seven chains:
+
+- mean test loss: `0.0936`
+- mean token accuracy: `0.9723`
+- mean length accuracy: `0.9920`
+- mean exact match: `0.4962`
+- best exact-match chains: `trg = 0.7658`, `trb = 0.7371`, `tra = 0.7112`
+- lowest exact-match chain: `igh = 0.1614`
+
+| chain | loss | token_accuracy | length_accuracy | exact_match |
+| --- | ---: | ---: | ---: | ---: |
+| igh | 0.2589 | 0.9199 | 0.9798 | 0.1614 |
+| igk | 0.0958 | 0.9739 | 0.9963 | 0.3178 |
+| igl | 0.0896 | 0.9740 | 0.9937 | 0.2766 |
+| tra | 0.0369 | 0.9907 | 0.9977 | 0.7112 |
+| trb | 0.0407 | 0.9884 | 0.9937 | 0.7371 |
+| trd | 0.0985 | 0.9697 | 0.9895 | 0.5036 |
+| trg | 0.0349 | 0.9895 | 0.9931 | 0.7658 |
+
+Training dynamics, convergence of length/exact-match, and mismatch counts across chains:
+
+![Inverse training overview](docs/results/inverse_training_overview.png)
+
+Letter-level substitution errors from the executed TRB inverse-analysis notebook:
+
+![Inverse substitution confusion matrix](docs/results/inverse_substitution_confusion_trb.png)
+
+### Pgen regression on TRB
+
+Saved notebook metrics on the 10k test split:
+
+- `RMSE = 0.5914`
+- `MAE = 0.4731`
+- `bias = 0.4399`
+- `Pearson r = 0.9874`
+- `Spearman rho = 0.9861`
+- `R^2 = 0.9437`
+
+| RMSE | MAE | bias | Pearson r | Spearman rho | R^2 | n_test |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.5914 | 0.4731 | 0.4399 | 0.9874 | 0.9861 | 0.9437 | 10000 |
+
+![Pgen regression diagnostics](docs/results/pgen_regression_diagnostics.png)
+
+### Inference-speed benchmark for the pgen predictor
+
+The committed notebook benchmark was executed on `CPU` and reports throughput and per-sequence latency on the 10k TRB test split:
+
+- batch `1`: `324.0 seq/s`, `3.086 ms/sequence`
+- batch `16`: `4934.1 seq/s`, `0.203 ms/sequence`
+- batch `64`: `9705.4 seq/s`, `0.103 ms/sequence`
+- batch `256`: `11001.8 seq/s`, `0.0909 ms/sequence`
+- batch `1024`: `9230.5 seq/s`, `0.1083 ms/sequence`
+
+The best throughput in this saved benchmark is at `batch_size = 256`.
+
+| batch_size | seq_per_second | ms_per_sequence |
+| ---: | ---: | ---: |
+| 1 | 324.0 | 3.0860 |
+| 16 | 4934.1 | 0.2027 |
+| 64 | 9705.4 | 0.1030 |
+| 256 | 11001.8 | 0.0909 |
+| 1024 | 9230.5 | 0.1083 |
+
+![Pgen inference benchmark](docs/results/pgen_inference_benchmark.png)
+
+## Notebook map
+
+Main notebooks live in `notebooks/` and are split by workflow:
+
+- `notebooks/example_run_and_analysis.ipynb`: forward-model walkthrough from input inspection to training, metrics, plots, and checkpoint restore
+- `notebooks/example_inverse_run_and_analysis.ipynb`: inverse-model analogue of the forward walkthrough
+- `notebooks/pgen_run_and_analysis.ipynb`: analysis notebook for trained sequence-to-`log10_pgen_1mm` models, including residual plots and inference timing
+- `notebooks/forward_background_100k_multichain_analysis.ipynb`: aggregate evaluation for all saved forward background-100k runs
+- `notebooks/inverse_background_100k_multichain_analysis.ipynb`: aggregate evaluation for all saved inverse background-100k runs
+- `notebooks/generate_datasets.ipynb`: helper notebook for preparing prototype AIRR datasets for IGH, IGK, IGL, TRD, and TRG
+- `notebooks/trb_1kk.ipynb`: compact TRB forward-run demo
+
+Historical or scratch material:
+
+- `notebooks/example_run_and_analysis-Copy1.ipynb`: older copy of the forward walkthrough kept for reference
+
+If you want one place to start, use:
+
+- forward training: `notebooks/example_run_and_analysis.ipynb`
+- inverse training: `notebooks/example_inverse_run_and_analysis.ipynb`
+- pgen model analysis and timing: `notebooks/pgen_run_and_analysis.ipynb`
+
+## How to test
+
+There is currently no dedicated `pytest` suite in the repository, so validation is done through smoke checks plus notebook-backed end-to-end checks.
+
+Recommended checks after `pip install -r requirements.txt`:
+
+```bash
+python -m compileall irrm_codec
+python -m irrm_codec.train_forward --help
+python -m irrm_codec.train_inverse --help
+python -m irrm_codec.calc_pgen_1mm --help
+python -m irrm_codec.train_pgen --help
+```
+
+Recommended workflow checks:
+
+1. Run one short forward training job with reduced epochs and confirm that `best.pt`, `last.pt`, `history.json`, `test_metrics.json`, and `data_stats.json` appear in the output directory.
+2. Run one short inverse training job and check that `test_metrics.json` contains `token_accuracy`, `length_accuracy`, and `exact_match`.
+3. Run `calc_pgen_1mm` on a small AIRR subset and confirm that the output table contains `pgen_1mm` and `log10_pgen_1mm`.
+4. Train the pgen regressor on that output and check that `test_metrics.json` contains `rmse` and `mae`.
+5. Open the matching notebook and verify that it can read the produced artifacts without manual file edits beyond the input-path cell.
+
+If you are validating the cluster wrappers instead of local modules:
+
+- submit `sbatch scripts/train_forward.sh` or `sbatch scripts/train_inverse.sh` for the 7-chain array jobs
+- submit the examples from `slurm/README.md` for single-run forward or pgen workflows
+- inspect logs under `slurm/logs/` or the cluster log directory configured in the script headers
 
 ## Notes
 
