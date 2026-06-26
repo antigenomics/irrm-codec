@@ -31,12 +31,32 @@ def prepare_batch_cache(args, logger=None):
 
     logger.info("creating batch cache in %s", cache_dir)
     logger.info("reading minimal AIRR columns from %s", args.airr_path)
-    airr_df = read_airr_table(
-        args.airr_path,
-        clone_id_col=args.clone_id_col,
-        columns=list(dict.fromkeys(airr_columns)),
-        validate=False,
-    )
+    requested_columns = list(dict.fromkeys(airr_columns))
+    try:
+        airr_df = read_airr_table(
+            args.airr_path,
+            clone_id_col=args.clone_id_col,
+            columns=requested_columns,
+            validate=False,
+        )
+    except ValueError as exc:
+        missing_clone_id = (
+            args.clone_id_col
+            and "Usecols do not match columns" in str(exc)
+            and args.clone_id_col in str(exc)
+        )
+        if not missing_clone_id:
+            raise
+        logger.warning(
+            "AIRR table does not contain %s; falling back to row-order alignment",
+            args.clone_id_col,
+        )
+        airr_df = read_airr_table(
+            args.airr_path,
+            clone_id_col=args.clone_id_col,
+            columns=[column for column in requested_columns if column != args.clone_id_col],
+            validate=False,
+        )
     if args.locus is not None and "locus" in airr_df.columns:
         logger.info("filtering AIRR by locus=%s", args.locus)
         airr_df = airr_df[airr_df["locus"] == args.locus].reset_index(drop=True)
