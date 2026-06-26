@@ -140,8 +140,8 @@ class CachedBatchDataset(IterableDataset):
 
         return {
             "embedding": embedding_tensor,
-            "decoder_input": torch.cat([torch.tensor([BOS_ID], dtype=torch.long), token_tensor], dim=0),
-            "target": torch.cat([token_tensor, torch.tensor([EOS_ID], dtype=torch.long)], dim=0),
+            "decoder_input": token_tensor,
+            "target": token_tensor,
             "length": len(tokens),
         }
 
@@ -208,8 +208,8 @@ class InverseDataset(Dataset):
         token_tensor = torch.tensor(tokens, dtype=torch.long)
         return {
             "embedding": torch.from_numpy(self.embs[idx]),
-            "decoder_input": torch.cat([torch.tensor([BOS_ID], dtype=torch.long), token_tensor], dim=0),
-            "target": torch.cat([token_tensor, torch.tensor([EOS_ID], dtype=torch.long)], dim=0),
+            "decoder_input": token_tensor,
+            "target": token_tensor,
             "length": len(tokens),
         }
 
