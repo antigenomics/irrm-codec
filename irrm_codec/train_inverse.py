@@ -177,6 +177,7 @@ def main():
             embedding_column=args.embedding_column,
         )
         data_stats = validate_dataframe(df, emb_array, max_len=args.max_len, clone_id_col=args.clone_id_col)
+        embedding_dim = int(emb_array.shape[1])
 
         rng = np.random.default_rng(args.seed)
         indices = rng.permutation(len(df))
@@ -224,7 +225,7 @@ def main():
             collate_fn=collate_inverse,
         )
 
-        model = InverseModel(embedding_dim=merge_stats["embedding_dim"], max_len=args.max_len).to(device)
+        model = InverseModel(embedding_dim=embedding_dim, max_len=args.max_len).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         num_parameters = sum(param.numel() for param in model.parameters())
         num_trainable_parameters = sum(param.numel() for param in model.parameters() if param.requires_grad)
@@ -235,7 +236,7 @@ def main():
             split_row_counts["train"],
             split_row_counts["val"],
             split_row_counts["test"],
-            merge_stats["embedding_dim"],
+            embedding_dim,
         )
         logger.info(
             "dataloader batches train=%d val=%d test=%d",
@@ -254,6 +255,7 @@ def main():
             {
                 **data_stats,
                 **merge_stats,
+                "embedding_dim": embedding_dim,
                 "airr_path": args.airr_path,
                 "embeddings_path": args.embeddings_path,
                 "train_size": int(split_row_counts["train"]),
@@ -303,7 +305,7 @@ def main():
                 optimizer,
                 epoch,
                 val_metrics,
-                extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": merge_stats["embedding_dim"]},
+                extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": embedding_dim},
             )
             logger.info("saved checkpoint path=%s", output_dir / "last.pt")
 
@@ -315,7 +317,7 @@ def main():
                     optimizer,
                     epoch,
                     val_metrics,
-                    extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": merge_stats["embedding_dim"]},
+                    extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": embedding_dim},
                 )
                 logger.info("new best checkpoint path=%s val_loss=%.4f", output_dir / "best.pt", best_val_loss)
 
