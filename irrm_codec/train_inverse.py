@@ -20,6 +20,7 @@ from irrm_codec.utils import (
     setup_logging,
     summarize_metrics,
 )
+from irrm_codec.wandb_utils import init_wandb_run, log_wandb_lr, log_wandb_metrics
 
 
 def parse_args():
@@ -42,6 +43,11 @@ def parse_args():
     parser.add_argument("--reader-batch-size", type=int, default=4096)
     parser.add_argument("--cache-batch-size", type=int, default=4096)
     parser.add_argument("--cache-dir", default="")
+    parser.add_argument("--wandb-project", default="irrm-codec")
+    parser.add_argument("--wandb-entity", default="")
+    parser.add_argument("--wandb-run-name", default="")
+    parser.add_argument("--wandb-dir", default="")
+    parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--no-progress", action="store_true")
     return parser.parse_args()
@@ -129,6 +135,7 @@ def main():
     output_dir = Path(args.output_dir)
     logger = setup_logging(output_dir / "train.log")
     cache_dir = None
+    run = None
 
     try:
         logger.info("starting inverse training")
@@ -146,6 +153,28 @@ def main():
             args.num_workers,
             args.log_interval,
         )
+        run = init_wandb_run(
+            args,
+            output_dir,
+            {
+                "task": "inverse",
+                "airr_path": args.airr_path,
+                "embeddings_path": args.embeddings_path,
+                "locus": args.locus,
+                "clone_id_col": args.clone_id_col,
+                "embedding_column": args.embedding_column,
+                "batch_size": args.batch_size,
+                "reader_batch_size": args.reader_batch_size,
+                "cache_batch_size": args.cache_batch_size,
+                "epochs": args.epochs,
+                "lr": args.lr,
+                "weight_decay": args.weight_decay,
+                "max_len": args.max_len,
+                "num_workers": args.num_workers,
+                "seed": args.seed,
+            },
+        )
+        logger.info("wandb_project=%s wandb_mode=%s", args.wandb_project, args.wandb_mode)
 
         prepared = prepare_cached_training_data(
             args,
@@ -227,6 +256,9 @@ def main():
                 not args.no_progress,
             )
             history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
+            log_wandb_metrics(run, "train", train_metrics, epoch)
+            log_wandb_metrics(run, "val", val_metrics, epoch)
+            log_wandb_lr(run, optimizer, epoch)
 
             save_checkpoint(
                 output_dir / "last.pt",
@@ -273,6 +305,7 @@ def main():
             args.log_interval,
             not args.no_progress,
         )
+        log_wandb_metrics(run, "test", test_metrics, len(history))
         save_json(output_dir / "history.json", history)
         save_json(output_dir / "test_metrics.json", test_metrics)
         logger.info(
@@ -284,6 +317,8 @@ def main():
             test_metrics["unk_fraction"],
         )
     finally:
+        if run is not None:
+            run.finish()
         if cache_dir is not None:
             cleanup_batch_cache(cache_dir, logger=logger)
 

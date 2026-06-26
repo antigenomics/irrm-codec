@@ -11,5 +11,6 @@ notebook
 ipykernel
 ipywidgets
 tqdm
+wandb
 torch==2.4.1
 mirpy-lib @ git+https://github.com/antigenomics/mirpy.git@11a5fd1ac12edd22e12a2bb167ab9dfb55ccefd4
