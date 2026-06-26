@@ -94,9 +94,9 @@ def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_in
     for step, batch in enumerate(progress, start=1):
         emb, decoder_input, target, lengths, unk_fraction = move_to_device(batch, device)
         with torch.set_grad_enabled(is_train):
-            logits, length_logits = model(emb, decoder_input)
-            loss = inverse_loss(logits, target, length_logits, lengths)
-            metrics = inverse_metrics(logits, target, length_logits, lengths)
+            logits = model(emb, decoder_input)
+            loss = inverse_loss(logits, target)
+            metrics = inverse_metrics(logits, target)
 
         if is_train:
             optimizer.zero_grad(set_to_none=True)
@@ -105,7 +105,7 @@ def run_epoch(model, loader, optimizer, device, stage, epoch, num_epochs, log_in
             optimizer.step()
             exact_match = 0.0
         else:
-            pred_tokens, _predicted_lengths = model.generate(emb, max_len=model.max_len)
+            pred_tokens = model.generate(emb, max_len=model.max_len)
             exact_match = exact_match_rate(pred_tokens, target)
 
         metric_sums["loss"] += loss.item()
