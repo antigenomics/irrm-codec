@@ -32,6 +32,13 @@ def parse_args():
     parser.add_argument("--clone-id-col", default="clone_id")
     parser.add_argument("--embedding-column", default="tcremp_emb")
     parser.add_argument("--max-len", type=int, default=40)
+    parser.add_argument("--token-embedding-dim", type=int, default=64)
+    parser.add_argument("--hidden-dim", type=int, default=192)
+    parser.add_argument("--mlp-dim", type=int, default=512)
+    parser.add_argument("--mlp-hidden-dim", type=int, default=1024)
+    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--dilations", default="1,2,4,8")
+    parser.add_argument("--encoder-type", choices=["residual", "plain_conv"], default="residual")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -116,12 +123,19 @@ def main():
         logger.info("output_dir=%s", output_dir.resolve())
         logger.info("device=%s seed=%d", device, args.seed)
         logger.info(
-            "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d num_workers=%d log_interval=%d",
+            "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d token_embedding_dim=%d hidden_dim=%d mlp_dim=%d mlp_hidden_dim=%d dropout=%.3f dilations=%s encoder_type=%s num_workers=%d log_interval=%d",
             args.batch_size,
             args.epochs,
             args.lr,
             args.weight_decay,
             args.max_len,
+            args.token_embedding_dim,
+            args.hidden_dim,
+            args.mlp_dim,
+            args.mlp_hidden_dim,
+            args.dropout,
+            args.dilations,
+            args.encoder_type,
             args.num_workers,
             args.log_interval,
         )
@@ -140,6 +154,13 @@ def main():
                 "lr": args.lr,
                 "weight_decay": args.weight_decay,
                 "max_len": args.max_len,
+                "token_embedding_dim": args.token_embedding_dim,
+                "hidden_dim": args.hidden_dim,
+                "mlp_dim": args.mlp_dim,
+                "mlp_hidden_dim": args.mlp_hidden_dim,
+                "dropout": args.dropout,
+                "dilations": args.dilations,
+                "encoder_type": args.encoder_type,
                 "num_workers": args.num_workers,
                 "seed": args.seed,
             },
@@ -202,7 +223,20 @@ def main():
             collate_fn=collate_forward,
         )
 
-        model = ForwardModel(output_dim=embedding_dim, max_len=args.max_len).to(device)
+        dilations = tuple(int(part.strip()) for part in args.dilations.split(",") if part.strip())
+        if not dilations:
+            raise ValueError("dilations must contain at least one integer.")
+        model = ForwardModel(
+            embedding_dim=args.token_embedding_dim,
+            hidden_dim=args.hidden_dim,
+            mlp_dim=args.mlp_dim,
+            mlp_hidden_dim=args.mlp_hidden_dim,
+            dropout=args.dropout,
+            dilations=dilations,
+            encoder_type=args.encoder_type,
+            output_dim=embedding_dim,
+            max_len=args.max_len,
+        ).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         num_parameters = sum(param.numel() for param in model.parameters())
         num_trainable_parameters = sum(param.numel() for param in model.parameters() if param.requires_grad)
@@ -282,7 +316,18 @@ def main():
                 optimizer,
                 epoch,
                 val_metrics,
-                extra={"task": "forward", "max_len": args.max_len, "embedding_dim": embedding_dim},
+                extra={
+                    "task": "forward",
+                    "max_len": args.max_len,
+                    "embedding_dim": embedding_dim,
+                    "token_embedding_dim": args.token_embedding_dim,
+                    "hidden_dim": args.hidden_dim,
+                    "mlp_dim": args.mlp_dim,
+                    "mlp_hidden_dim": args.mlp_hidden_dim,
+                    "dropout": args.dropout,
+                    "dilations": args.dilations,
+                    "encoder_type": args.encoder_type,
+                },
             )
             logger.info("saved checkpoint path=%s", output_dir / "last.pt")
 
@@ -294,7 +339,18 @@ def main():
                     optimizer,
                     epoch,
                     val_metrics,
-                    extra={"task": "forward", "max_len": args.max_len, "embedding_dim": embedding_dim},
+                    extra={
+                        "task": "forward",
+                        "max_len": args.max_len,
+                        "embedding_dim": embedding_dim,
+                        "token_embedding_dim": args.token_embedding_dim,
+                        "hidden_dim": args.hidden_dim,
+                        "mlp_dim": args.mlp_dim,
+                        "mlp_hidden_dim": args.mlp_hidden_dim,
+                        "dropout": args.dropout,
+                        "dilations": args.dilations,
+                        "encoder_type": args.encoder_type,
+                    },
                 )
                 logger.info("new best checkpoint path=%s val_loss=%.4f", output_dir / "best.pt", best_val_loss)
 

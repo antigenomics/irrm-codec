@@ -33,6 +33,11 @@ def parse_args():
     parser.add_argument("--clone-id-col", default="clone_id")
     parser.add_argument("--embedding-column", default="tcremp_emb")
     parser.add_argument("--max-len", type=int, default=40)
+    parser.add_argument("--hidden-dim", type=int, default=512)
+    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--num-layers", type=int, default=3)
+    parser.add_argument("--nhead", type=int, default=8)
+    parser.add_argument("--ff-mult", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -139,12 +144,17 @@ def main():
         logger.info("output_dir=%s", output_dir.resolve())
         logger.info("device=%s seed=%d", device, args.seed)
         logger.info(
-            "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d num_workers=%d log_interval=%d",
+            "hyperparameters batch_size=%d epochs=%d lr=%.6f weight_decay=%.6f max_len=%d hidden_dim=%d dropout=%.3f num_layers=%d nhead=%d ff_mult=%d num_workers=%d log_interval=%d",
             args.batch_size,
             args.epochs,
             args.lr,
             args.weight_decay,
             args.max_len,
+            args.hidden_dim,
+            args.dropout,
+            args.num_layers,
+            args.nhead,
+            args.ff_mult,
             args.num_workers,
             args.log_interval,
         )
@@ -163,6 +173,11 @@ def main():
                 "lr": args.lr,
                 "weight_decay": args.weight_decay,
                 "max_len": args.max_len,
+                "hidden_dim": args.hidden_dim,
+                "dropout": args.dropout,
+                "num_layers": args.num_layers,
+                "nhead": args.nhead,
+                "ff_mult": args.ff_mult,
                 "num_workers": args.num_workers,
                 "seed": args.seed,
             },
@@ -225,7 +240,15 @@ def main():
             collate_fn=collate_inverse,
         )
 
-        model = InverseModel(embedding_dim=embedding_dim, max_len=args.max_len).to(device)
+        model = InverseModel(
+            embedding_dim=embedding_dim,
+            hidden_dim=args.hidden_dim,
+            max_len=args.max_len,
+            dropout=args.dropout,
+            num_layers=args.num_layers,
+            nhead=args.nhead,
+            ff_mult=args.ff_mult,
+        ).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         num_parameters = sum(param.numel() for param in model.parameters())
         num_trainable_parameters = sum(param.numel() for param in model.parameters() if param.requires_grad)
@@ -305,7 +328,16 @@ def main():
                 optimizer,
                 epoch,
                 val_metrics,
-                extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": embedding_dim},
+                extra={
+                    "task": "inverse",
+                    "max_len": args.max_len,
+                    "embedding_dim": embedding_dim,
+                    "hidden_dim": args.hidden_dim,
+                    "dropout": args.dropout,
+                    "num_layers": args.num_layers,
+                    "nhead": args.nhead,
+                    "ff_mult": args.ff_mult,
+                },
             )
             logger.info("saved checkpoint path=%s", output_dir / "last.pt")
 
@@ -317,7 +349,16 @@ def main():
                     optimizer,
                     epoch,
                     val_metrics,
-                    extra={"task": "inverse", "max_len": args.max_len, "embedding_dim": embedding_dim},
+                    extra={
+                        "task": "inverse",
+                        "max_len": args.max_len,
+                        "embedding_dim": embedding_dim,
+                        "hidden_dim": args.hidden_dim,
+                        "dropout": args.dropout,
+                        "num_layers": args.num_layers,
+                        "nhead": args.nhead,
+                        "ff_mult": args.ff_mult,
+                    },
                 )
                 logger.info("new best checkpoint path=%s val_loss=%.4f", output_dir / "best.pt", best_val_loss)
 
