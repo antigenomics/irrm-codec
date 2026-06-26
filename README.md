@@ -132,6 +132,46 @@ Useful optional flags:
 - `--log-interval 10`
 - `--no-progress`
 
+### Architecture hyperparameters
+
+The `forward` and `inverse` training entrypoints also expose model-architecture
+parameters so they can be tuned directly from CLI, W&B sweeps, or Slurm jobs.
+
+#### Forward model
+
+- `--token-embedding-dim`: size of the learned amino-acid token embedding before
+  convolutional encoding. Larger values increase model capacity in the first
+  layer and slightly increase memory use.
+- `--hidden-dim`: width of the convolutional encoder. This is one of the main
+  capacity controls for the forward model.
+- `--mlp-dim`: width of the first projection layer after sequence pooling.
+  Increasing it gives the head more room to combine pooled features.
+- `--mlp-hidden-dim`: width of the second projection layer in the prediction
+  head before the final embedding output.
+- `--dropout`: dropout rate used inside the convolution blocks and MLP head.
+  Higher values regularize more strongly but can slow fitting.
+- `--dilations`: comma-separated dilation schedule for the convolution blocks,
+  for example `1,2,4,8`. Larger or longer schedules increase receptive field.
+- `--encoder-type`: encoder block family. `residual` usually trains more
+  stably at higher capacity, while `plain_conv` is simpler and sometimes faster.
+
+#### Inverse model
+
+- `--hidden-dim`: transformer hidden width after projecting the TCRemP
+  embedding. This is the main width parameter of the inverse decoder.
+- `--dropout`: dropout rate in the embedding projection and transformer blocks.
+- `--num-layers`: number of transformer encoder layers used in the parallel
+  sequence decoder. More layers increase depth and compute.
+- `--nhead`: number of attention heads in each transformer layer. Must stay
+  compatible with `hidden-dim`.
+- `--ff-mult`: feed-forward expansion multiplier inside each transformer layer.
+  The inner feed-forward size is `hidden_dim * ff_mult`.
+
+In practice, the most influential architecture knobs are usually:
+
+- forward: `hidden-dim`, `dropout`, `encoder-type`, `dilations`
+- inverse: `hidden-dim`, `dropout`, `num-layers`
+
 ## 1mm pgen calculation
 
 Use the dedicated module to compute 1-mismatch pgen values through `mirpy`'s

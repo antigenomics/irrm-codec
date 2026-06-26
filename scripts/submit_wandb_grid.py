@@ -5,17 +5,17 @@ from pathlib import Path
 
 
 FORWARD_GRID = {
-    "token_embedding_dim": [64],
-    "hidden_dim": [192, 256],
-    "mlp_dim": [512, 768],
+    "token_embedding_dim": [32],
+    "hidden_dim": [128, 192, 256],
+    "mlp_dim": [256, 512],
     "mlp_hidden_dim": [1024],
     "dropout": [0.1, 0.2],
-    "dilations": ["1,2,4,8", "1,2,4,8,16"],
+    "dilations": ["1,2,4,8"],
     "encoder_type": ["residual", "plain_conv"],
 }
 
 INVERSE_GRID = {
-    "hidden_dim": [384, 512, 768],
+    "hidden_dim": [256, 512, 768],
     "dropout": [0.1, 0.2],
     "num_layers": [2, 3, 4],
     "nhead": [8],
